@@ -41,6 +41,12 @@ FFMPEGCONF = --prefix="$(PREFIX)" --enable-static --disable-shared \
 ifdef HAVE_DARWIN_OS
 FFMPEGCONF += \
 	--disable-securetransport
+ifdef HAVE_IOS
+FFMPEGCONF += \
+	--disable-decoder=mlp \
+	--disable-demuxer=mlp \
+	--disable-parser=mlp
+endif
 endif
 
 ifdef ENABLE_PDB
@@ -242,6 +248,7 @@ ffmpeg: ffmpeg-$(FFMPEG_VERSION).tar.xz .sum-ffmpeg
 	$(APPLY) $(SRC)/ffmpeg/0001-fix-mf_utils-compilation-with-mingw64.patch
 	$(APPLY) $(SRC)/ffmpeg/0011-avcodec-videotoolboxenc-disable-calls-on-unsupported.patch
 	$(APPLY) $(SRC)/ffmpeg/avcodec-fix-compilation-visionos.patch
+	$(APPLY) $(SRC)/ffmpeg/avcodec-enable-audiotoolbox-ac3.patch
 	$(MOVE)
 
 .ffmpeg: ffmpeg
