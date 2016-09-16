@@ -115,6 +115,18 @@ VLC_API void
 vlc_player_Delete(vlc_player_t *player);
 
 /**
+ * Get the HTTP cookie jar shared by the player
+ *
+ * This is the jar inherited by the http access of any media played by this
+ * player. It is owned by the player and valid until vlc_player_Delete().
+ *
+ * @param player player instance created by vlc_player_New()
+ * @return the cookie jar, or NULL if the player has none
+ */
+VLC_API struct vlc_http_cookie_jar_t *
+vlc_player_GetCookieJar(vlc_player_t *player);
+
+/**
  * Lock the player.
  *
  * All player functions (except vlc_player_Delete()) need to be called while

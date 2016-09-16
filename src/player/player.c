@@ -2062,6 +2062,12 @@ vlc_player_Delete(vlc_player_t *player)
     vlc_object_delete(player);
 }
 
+vlc_http_cookie_jar_t *
+vlc_player_GetCookieJar(vlc_player_t *player)
+{
+    return var_GetAddress(player, "http-cookies");
+}
+
 vlc_player_t *
 vlc_player_New(vlc_object_t *parent, enum vlc_player_lock_type lock_type)
 {

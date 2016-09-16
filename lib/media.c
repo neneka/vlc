@@ -217,12 +217,16 @@ void libvlc_media_add_subtree(libvlc_media_t *p_md, const input_item_node_t *nod
     input_item_add_subnode( p_md, node );
 }
 
+static void media_cookies_clear( libvlc_media_t *p_md );
+
 static void media_destroy( void *libvlc_owner )
 {
     libvlc_media_t *p_md = libvlc_owner;
 
     if( p_md->p_subitems )
         libvlc_media_list_release( p_md->p_subitems );
+
+    media_cookies_clear( p_md );
 
     free( p_md );
 }
@@ -267,6 +271,8 @@ libvlc_media_t * libvlc_media_new_from_input_item(input_item_t *p_input_item )
     input_item_SetLibvlcOwner( p_md->p_input_item, p_md, media_destroy );
     atomic_init(&p_md->parsed_status, libvlc_media_parsed_status_none);
     p_md->req = NULL;
+    p_md->p_cookies = NULL;
+    p_md->i_cookies = 0;
 
     input_item_Hold( p_md->p_input_item );
 
@@ -817,4 +823,64 @@ void libvlc_media_slaves_release( libvlc_media_slave_t **pp_slaves,
             free( pp_slaves[i] );
     }
     free( pp_slaves );
+}
+
+static void
+media_cookies_clear( libvlc_media_t *p_md )
+{
+    for( size_t i = 0; i < p_md->i_cookies; ++i )
+    {
+        free( p_md->p_cookies[i].psz_cookie );
+        free( p_md->p_cookies[i].psz_host );
+        free( p_md->p_cookies[i].psz_path );
+    }
+    free( p_md->p_cookies );
+    p_md->p_cookies = NULL;
+    p_md->i_cookies = 0;
+}
+
+int
+libvlc_media_cookie_jar_store( libvlc_media_t *p_md, const char *psz_cookie,
+                               const char *psz_host, const char *psz_path )
+{
+    assert( psz_cookie != NULL && psz_host != NULL && psz_path != NULL );
+
+    struct libvlc_media_cookie_t *p_cookies =
+        vlc_reallocarray( p_md->p_cookies, p_md->i_cookies + 1,
+                          sizeof( *p_cookies ) );
+    if( p_cookies == NULL )
+        return -1;
+    p_md->p_cookies = p_cookies;
+
+    struct libvlc_media_cookie_t *p_new = &p_cookies[p_md->i_cookies];
+    p_new->psz_cookie = strdup( psz_cookie );
+    p_new->psz_host = strdup( psz_host );
+    p_new->psz_path = strdup( psz_path );
+    if( p_new->psz_cookie == NULL || p_new->psz_host == NULL
+     || p_new->psz_path == NULL )
+    {
+        free( p_new->psz_cookie );
+        free( p_new->psz_host );
+        free( p_new->psz_path );
+        return -1;
+    }
+    p_md->i_cookies++;
+
+    return 0;
+}
+
+void
+libvlc_media_cookie_jar_clear( libvlc_media_t *p_md )
+{
+    media_cookies_clear( p_md );
+}
+
+void
+libvlc_media_cookies_replay( libvlc_media_t *p_md,
+                             vlc_http_cookie_jar_t *p_jar )
+{
+    for( size_t i = 0; i < p_md->i_cookies; ++i )
+        vlc_http_cookies_store( p_jar, p_md->p_cookies[i].psz_cookie,
+                                p_md->p_cookies[i].psz_host,
+                                p_md->p_cookies[i].psz_path );
 }

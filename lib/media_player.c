@@ -1032,6 +1032,18 @@ int libvlc_media_player_play( libvlc_media_player_t *p_mi )
     vlc_player_t *player = p_mi->player;
     vlc_player_Lock(player);
 
+    /* The cookie jar used by the http access is owned by the player, so the
+     * cookies stored on the media have to be replayed into it. */
+    input_item_t *item = vlc_player_GetCurrentMedia(player);
+    if( item != NULL )
+    {
+        libvlc_media_t *p_md = input_item_GetLibvlcOwner(item);
+        vlc_http_cookie_jar_t *p_jar = vlc_player_GetCookieJar( player );
+
+        if( p_md != NULL && p_jar != NULL )
+            libvlc_media_cookies_replay( p_md, p_jar );
+    }
+
     int ret = vlc_player_Start(player);
     if (ret == VLC_SUCCESS)
     {

@@ -32,6 +32,7 @@
 #include <vlc_player.h>
 #include <vlc_preparser.h>
 #include <vlc_atomic.h>
+#include <vlc_http.h>
 
 /* internal parse state of a media */
 typedef enum libvlc_media_parsed_status_t
@@ -39,6 +40,17 @@ typedef enum libvlc_media_parsed_status_t
     libvlc_media_parsed_status_none,
     libvlc_media_parsed_status_done,
 } libvlc_media_parsed_status_t;
+
+/* A cookie stored on a media, as passed to libvlc_media_cookie_jar_store().
+ * The player owns the cookie jar actually used by the http access, so cookies
+ * are kept here verbatim and replayed into that jar by
+ * libvlc_media_player_play(). */
+struct libvlc_media_cookie_t
+{
+    char *psz_cookie;
+    char *psz_host;
+    char *psz_path;
+};
 
 /* A media is a wrapper of its input item and shares its reference count:
  * libvlc_media_retain()/libvlc_media_release() forward to the input item and
@@ -52,7 +64,14 @@ struct libvlc_media_t
 
     _Atomic libvlc_media_parsed_status_t parsed_status;
     vlc_preparser_req *req;
+
+    struct libvlc_media_cookie_t *p_cookies;
+    size_t i_cookies;
 };
+
+/* Replay the cookies stored on p_md into p_jar. */
+void libvlc_media_cookies_replay( libvlc_media_t *p_md,
+                                  vlc_http_cookie_jar_t *p_jar );
 
 /* Media Descriptor */
 libvlc_media_t * libvlc_media_new_from_input_item( input_item_t * );
