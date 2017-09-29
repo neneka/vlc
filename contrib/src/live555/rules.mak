@@ -1,13 +1,11 @@
 # live555
 
-LIVE555_VERSION := 2016.11.28
+LIVE555_VERSION := 2016.10.21
 LIVE555_FILE := live.$(LIVE555_VERSION).tar.gz
 LIVEDOTCOM_URL := $(CONTRIB_VIDEOLAN)/live555/$(LIVE555_FILE)
 
 ifdef BUILD_NETWORK
-ifdef GNUV3
 PKGS += live555
-endif
 endif
 
 ifeq ($(call need_pkg,"live555"),)
@@ -93,7 +91,6 @@ endif
 LIVE555_SUBDIRS=groupsock liveMedia UsageEnvironment BasicUsageEnvironment
 
 .live555: live555
-	$(REQUIRE_GNUV3)
 	cd $< && for subdir in $(LIVE555_SUBDIRS); do \
 		echo "PREFIX = $(PREFIX)" >> $$subdir/Makefile.head && \
 		echo "LIBDIR = $(PREFIX)/lib" >> $$subdir/Makefile.head ; done
