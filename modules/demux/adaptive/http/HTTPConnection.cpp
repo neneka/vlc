@@ -421,6 +421,7 @@ RequestStatus LibVLCHTTPConnection::request(const std::string &path,
         return RequestStatus::GenericError;
 
     /* Set credentials from URL. Deprecated warning will follow */
+
     struct vlc_credential crd;
     struct vlc_url_t crd_url;
     vlc_UrlParse(&crd_url, params.getUrl().c_str());
