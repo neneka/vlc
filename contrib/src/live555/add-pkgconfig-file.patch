@@ -11,7 +11,7 @@ diff --git a/Makefile.tail b/Makefile.tail
 -install:
 +install_shared_libraries:
 +	install -d $(DESTDIR)$(LIBDIR)/pkgconfig
-+	sed "s#@PREFIX@#$(PREFIX)#;s#@VERSION@#$(VERSION)#" live555.pc.in > $(DESTDIR)$(LIBDIR)/pkgconfig/live555.pc
++	sed "s#@PREFIX@#$(PREFIX)#;s#@LIBDIR@#$(LIBDIR)#;s#@VERSION@#$(VERSION)#" live555.pc.in > $(DESTDIR)$(LIBDIR)/pkgconfig/live555.pc
 +	chmod 644 $(DESTDIR)$(LIBDIR)/pkgconfig/live555.pc
 +
 +install: $(INSTALL2)
@@ -22,13 +22,13 @@ diff --git a/Makefile.tail b/Makefile.tail
 +++ live.2016.07.19/live555.pc.in	2017-01-19 18:46:01.456059400 +0100
 @@ -0,0 +1,9 @@
 +prefix=@PREFIX@
-+libdir=${prefix}/lib
++libdir=@LIBDIR@
 +includedir=${prefix}/include
 +
 +Name: live555
 +Description: multimedia RTSP streaming library
 +Version: @VERSION@
-+Cflags: -I${includedir}/liveMedia -I${includedir}/groupsock -I${includedir}/BasicUsageEnvironment -I${includedir}/UsageEnvironment -DNO_OPENSSL=1
++Cflags: -I${includedir}/liveMedia -I${includedir}/groupsock -I${includedir}/BasicUsageEnvironment -I${includedir}/UsageEnvironment
 +Libs: -L${libdir} -lliveMedia -lgroupsock -lBasicUsageEnvironment -lUsageEnvironment
 --- live.2016.07.19/Makefile.head.orig	2017-01-19 18:47:50.376062631 +0100
 +++ live.2016.07.19/Makefile.head	2017-01-19 18:48:09.940063212 +0100
