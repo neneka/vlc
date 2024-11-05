@@ -25,10 +25,10 @@ else
 download = $(error Neither curl nor wget found!)
 endif
 
-ifeq ($(shell command -v sha512sum >/dev/null 2>&1 || echo FAIL),)
-SHA512SUM = sha512sum -c
-else ifeq ($(shell command -v shasum >/dev/null 2>&1 || echo FAIL),)
+ifeq ($(shell command -v shasum >/dev/null 2>&1 || echo FAIL),)
 SHA512SUM = shasum -a 512 --check
+else ifeq ($(shell command -v sha512sum >/dev/null 2>&1 || echo FAIL),)
+SHA512SUM = sha512sum -c
 else ifeq ($(shell command -v openssl >/dev/null 2>&1 || echo FAIL),)
 SHA512SUM = openssl dgst -sha512
 else
