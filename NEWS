@@ -346,6 +346,8 @@ LibVLC:
  * Add libvlc_picture and libvlc_picture_list APIs, including RGBA and WebP
    support
  * Rework media parsing and thumbnailing around the new libvlc_parser API
+ * Add libvlc_downloader API that provides a bitstream of media to client
+   applications
  * Add media track list APIs, refcounted media tracks, multiple track
    selection and selected-track reporting
  * Add media-player timer/watch APIs, record API, program API, next-media API,
