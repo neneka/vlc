@@ -37,7 +37,8 @@ FFMPEGCONF = --prefix="$(PREFIX)" --enable-static --disable-shared \
 	--disable-iconv \
 	--disable-avisynth \
 	--disable-nvenc \
-	--disable-linux-perf
+	--disable-linux-perf \
+	--enable-libaribcaption
 ifdef HAVE_DARWIN_OS
 FFMPEGCONF += \
 	--disable-securetransport
@@ -53,7 +54,7 @@ ifdef ENABLE_PDB
 FFMPEGCONF += --ln_s=false
 endif
 
-DEPS_ffmpeg = zlib $(DEPS_zlib) gsm $(DEPS_gsm) openjpeg $(DEPS_openjpeg)
+DEPS_ffmpeg = zlib $(DEPS_zlib) gsm $(DEPS_gsm) openjpeg $(DEPS_openjpeg) libaribcaption $(DEPS_libaribcaption)
 
 # Optional dependencies
 ifndef BUILD_NETWORK
