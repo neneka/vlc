@@ -263,14 +263,15 @@ static int Decode(decoder_t *p_dec, block_t *p_block)
         block_Release(p_block);
         return VLCDEC_SUCCESS;
     }
+
     p_spu->i_start = p_block->i_pts;
-    p_spu->i_stop = p_block->i_pts;
     p_spu->b_fade = p_sys->b_cfg_fadeout;
 
-    if (caption.wait_duration == ARIBCC_DURATION_INDEFINITE) {
+    if (caption.wait_duration == ARIBCC_DURATION_INDEFINITE || caption.wait_duration <= 0) {
         p_spu->b_ephemer = true;
+        p_spu->i_stop = VLC_TICK_INVALID;
     } else {
-        p_spu->i_stop = p_block->i_pts + VLC_TICK_FROM_MS(caption.wait_duration);
+        p_spu->i_stop = p_spu->i_start + VLC_TICK_FROM_MS(caption.wait_duration);
     }
 
 
