@@ -252,6 +252,7 @@ ffmpeg: ffmpeg-$(FFMPEG_VERSION).tar.xz .sum-ffmpeg
 	$(APPLY) $(SRC)/ffmpeg/0011-avcodec-videotoolboxenc-disable-calls-on-unsupported.patch
 	$(APPLY) $(SRC)/ffmpeg/avcodec-fix-compilation-visionos.patch
 	$(APPLY) $(SRC)/ffmpeg/avcodec-enable-audiotoolbox-ac3.patch
+	$(APPLY) $(SRC)/ffmpeg/9000-avformat-add-MMTP-parser-and-MMT-TLV-demuxer.patch
 	$(MOVE)
 
 .ffmpeg: ffmpeg
