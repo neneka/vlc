@@ -560,6 +560,7 @@ int avformat_OpenDemux( vlc_object_t *p_this )
                 es_fmt.video.i_sar_den = ar.den;
                 es_fmt.video.i_sar_num = ar.num;
             }
+
             break;
 
         case AVMEDIA_TYPE_SUBTITLE:
@@ -621,6 +622,8 @@ int avformat_OpenDemux( vlc_object_t *p_this )
             }
             break;
         }
+        if( !strcmp( p_sys->fmt->name, "mmttlv" ) )
+            es_fmt.b_packetized = false;
 
         AVDictionaryEntry *language = av_dict_get( s->metadata, "language", NULL, 0 );
         if ( language && language->value )
