@@ -40,6 +40,7 @@ vlc_player_ResetTimer(vlc_player_t *player)
     player->timer.smpte_source.smpte.last_framenum = ULONG_MAX;
     player->timer.seek_ts = VLC_TICK_INVALID;
     player->timer.seek_position = -1;
+    player->timer.trust_demux_pos = -1;
     player->timer.update_state = UPDATE_STATE_RESUMED;
     player->timer.pause_date = VLC_TICK_INVALID;
     player->timer.stopping = false;
@@ -366,7 +367,39 @@ vlc_player_UpdateTimerSource(vlc_player_t *player,
     else
         source->point.system_date = system_date;
 
-    if (source->point.length != VLC_TICK_INVALID && !source->point.live)
+    struct vlc_player_input *input = player->input;
+    bool trust_demux_pos = false;
+
+    if (player->timer.trust_demux_pos != -1)
+    {
+        trust_demux_pos = (player->timer.trust_demux_pos == 1);
+    }
+    else
+    {
+        int trust_status = 0;
+        if (input && input->thread)
+        {
+            input_thread_private_t *priv = input_priv(input->thread);
+            if (priv->master && priv->master->p_demux)
+            {
+                demux_t *p_demux = priv->master->p_demux;
+                if (var_GetBool(p_demux, "is-mpegts"))
+                {
+                  bool stream_can_fastseek = false;
+                  if (p_demux->s)
+                    vlc_stream_Control(p_demux->s, STREAM_CAN_FASTSEEK, &stream_can_fastseek);
+
+                  msg_Dbg(player, "TIMER: MPEG-TS detected via is-mpegts. stream_can_fastseek: %d", stream_can_fastseek);
+                  if (!stream_can_fastseek)
+                    trust_status = 1;
+                }
+            }
+        }
+        player->timer.trust_demux_pos = trust_status;
+        trust_demux_pos = (trust_status == 1);
+    }
+
+    if (!trust_demux_pos && source->point.length != VLC_TICK_INVALID && !source->point.live)
         source->point.position = (ts - player->timer.input_normal_time - player->timer.start_offset)
                                / (double) source->point.length;
     else

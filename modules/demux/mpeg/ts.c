@@ -503,6 +503,10 @@ static int Open( vlc_object_t *p_this )
     p_sys->b_ignore_time_for_positions = var_InheritBool( p_demux, "ts-seek-percent" );
     p_sys->b_cc_check = var_InheritBool( p_demux, "ts-cc-check" );
 
+    /* p_demuxにMPEG-TSであることを埋め込む */
+    var_Create(p_demux, "is-mpegts", VLC_VAR_BOOL);
+    var_SetBool(p_demux, "is-mpegts", true);
+
     p_sys->standard = TS_STANDARD_AUTO;
     char *psz_standard = var_InheritString( p_demux, "ts-standard" );
     if( psz_standard )
@@ -940,6 +944,8 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
         }
 
         if( !p_sys->b_ignore_time_for_positions &&
+             // PCRを用いた現在位置計算はcanfastseek(ローカルファイル)時のみ
+             p_sys->b_canfastseek &&
              p_pmt &&
              p_pmt->pcr.i_first != VLC_TICK_INVALID &&
              p_pmt->i_last_dts != VLC_TICK_INVALID &&
@@ -1014,13 +1020,45 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
     {
         vlc_tick_t i_time = va_arg( args, vlc_tick_t );
 
-        if( p_sys->b_canseek && p_pmt && p_pmt->pcr.i_first != VLC_TICK_INVALID &&
-           !SeekToTime( p_demux, p_pmt, p_pmt->pcr.i_first + i_time ) )
+        if( p_sys->b_canfastseek && p_pmt && p_pmt->pcr.i_first != VLC_TICK_INVALID )
         {
-            ReadyQueuesPostSeek( p_demux );
-            es_out_Control( p_demux->out, ES_OUT_SET_NEXT_DISPLAY_TIME,
-                            p_pmt->pcr.i_first + i_time - VLC_TICK_0 );
-            return VLC_SUCCESS;
+            if( !SeekToTime( p_demux, p_pmt, p_pmt->pcr.i_first + i_time ) )
+            {
+                ReadyQueuesPostSeek( p_demux );
+                es_out_Control( p_demux->out, ES_OUT_SET_NEXT_DISPLAY_TIME,
+                                p_pmt->pcr.i_first + i_time - VLC_TICK_0 );
+                return VLC_SUCCESS;
+            }
+        }
+        else if( !p_sys->b_canfastseek && p_pmt &&
+                 p_pmt->pcr.i_current != VLC_TICK_INVALID &&
+                 ( p_pmt->pcr.i_first != VLC_TICK_INVALID || p_pmt->pcr.i_first_dts != VLC_TICK_INVALID ) &&
+                 p_pmt->i_last_dts != VLC_TICK_INVALID )
+        {
+            /* 非高速シーク時（ストリーム等）のフォールバックを、
+             * 現在の絶対バイト位置を基準にした相対移動で行う。 */
+            vlc_tick_t i_start = (p_pmt->pcr.i_first != VLC_TICK_INVALID) ? p_pmt->pcr.i_first :
+                                  p_pmt->pcr.i_first_dts;
+            vlc_tick_t i_last = p_pmt->i_last_dts + p_pmt->pcr.i_pcroffset;
+            vlc_tick_t i_duration = i_last - i_start;
+
+            uint64_t u64;
+            if( i_duration > 0 && vlc_stream_GetSize( p_sys->stream, &u64 ) == VLC_SUCCESS )
+            {
+                double f_current_pos = (double)vlc_stream_Tell( p_sys->stream ) / (double)u64;
+                vlc_tick_t i_current_time = p_pmt->pcr.i_current - p_pmt->pcr.i_first;
+                double f_diff = (double)(i_time - i_current_time) / (double)i_duration;
+                double f_target = f_current_pos + f_diff;
+
+                if( f_target < 0.0 ) f_target = 0.0;
+                else if( f_target > 1.0 ) f_target = 1.0;
+
+                if( vlc_stream_Seek( p_sys->stream, (uint64_t)(u64 * f_target) ) == VLC_SUCCESS )
+                {
+                    ReadyQueuesPostSeek( p_demux );
+                    return VLC_SUCCESS;
+                }
+            }
         }
         break;
     }
@@ -1062,8 +1100,8 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
             }
         }
 
-        if( !p_sys->b_ignore_time_for_positions &&
-            p_pmt &&
+        // ts-seek-percentが有効でも長さは取らせる
+        if( p_pmt &&
            ( p_pmt->pcr.i_first != VLC_TICK_INVALID || p_pmt->pcr.i_first_dts != VLC_TICK_INVALID ) &&
              p_pmt->i_last_dts != VLC_TICK_INVALID )
         {
