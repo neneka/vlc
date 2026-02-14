@@ -51,4 +51,6 @@ void ts_arib_logo_dr_Delete( ts_arib_logo_dr_t * );
 bool ts_arib_inject_png_palette( const uint8_t *p_in, size_t i_in,
                                  uint8_t **pp_out, size_t *pi_out );
 
+char * ts_arib_Decode( const uint8_t *p_in, size_t i_in );
+
 #endif
