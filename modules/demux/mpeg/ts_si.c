@@ -118,7 +118,10 @@ static char *EITConvertToUTF8( demux_t *p_demux,
         return psz_outstring;
     }
 #else
-    VLC_UNUSED(p_sys);
+    if ( p_sys->standard == TS_STANDARD_ARIB )
+    {
+        return ts_arib_Decode( psz_instring, i_length );
+    }
 #endif
     /* Deal with no longer broken providers (no switch byte
       but sending ISO_8859-1 instead of ISO_6937) without
