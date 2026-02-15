@@ -95,6 +95,9 @@ static void CopyImageToRegion(picture_t *dst_pic, const aribcc_image_t *image)
     if(image->pixel_format != ARIBCC_PIXELFORMAT_RGBA8888)
         return;
 
+    if(image->bitmap == NULL)
+        return;
+
     plane_t *p_dstplane = &dst_pic->p[0];
     plane_t srcplane;
     srcplane.i_lines = image->height;
