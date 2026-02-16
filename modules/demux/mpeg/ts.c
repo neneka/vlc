@@ -933,7 +933,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
         pf = va_arg( args, double * );
 
         /* Access control test is because EPG for recordings is not relevant */
-        if( p_sys->b_access_control )
+        if( false && p_sys->b_access_control )
         {
             time_t i_time, i_length;
             if( !EITCurrentEventTime( p_pmt, p_sys, &i_time, &i_length ) && i_length > 0 )
@@ -976,7 +976,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
         if(!p_sys->b_canseek)
             break;
 
-        if( p_sys->b_access_control &&
+        if( false && p_sys->b_access_control &&
            !p_sys->b_ignore_time_for_positions && b_bool && p_pmt )
         {
             time_t i_time, i_length = 0;
@@ -1064,7 +1064,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
     }
 
     case DEMUX_GET_TIME:
-        if( p_sys->b_access_control )
+        if( false && p_sys->b_access_control )
         {
             time_t i_event_start;
             if( !EITCurrentEventTime( p_pmt, p_sys, &i_event_start, NULL ) )
@@ -1090,7 +1090,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
         return VLC_SUCCESS;
 
     case DEMUX_GET_LENGTH:
-        if( p_sys->b_access_control )
+        if( false && p_sys->b_access_control )
         {
             time_t i_event_duration;
             if( !EITCurrentEventTime( p_pmt, p_sys, NULL, &i_event_duration ) )
