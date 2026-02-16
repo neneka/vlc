@@ -402,7 +402,7 @@ static void TDTCallBack( void *opaque, dvbpsi_tot_t *p_tdt )
            but as there's no DST in JAPAN (since Showa 27/1952)
            and considering that no-one seems to send TDT or desc 0x58,
            falling back on fixed offset is safe */
-        p_sys->i_network_time += 9 * 3600;
+        p_sys->i_network_time -= 9 * 3600;
     }
 
     /* Because libdvbpsi is broken and deduplicating timestamp tables,
@@ -544,7 +544,7 @@ static void EITCallBack( void *opaque, dvbpsi_eit_t *p_eit )
         if( p_sys->standard == TS_STANDARD_ARIB )
         {
             /* See comments on TDT callback */
-            i_start += 9 * 3600;
+            i_start -= 9 * 3600;
         }
 
         msg_Dbg( p_demux, "  * event id=%"PRIu16" start_time:%"PRId64" duration=%d "
