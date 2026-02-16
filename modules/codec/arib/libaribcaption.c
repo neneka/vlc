@@ -53,6 +53,7 @@ typedef struct
     aribcc_context_t  *p_context;
     aribcc_decoder_t  *p_decoder;
     aribcc_renderer_t *p_renderer;
+    vlc_mutex_t        aribcc_lock; // protect p_decoder/p_renderer (libaribcaption is not thread-safe)
 
     vlc_mutex_t        dec_lock;    // protect p_dec pointer
     decoder_t*         p_dec;       // pointer to decoder_t for logcat callback, NULL if decoder closed
@@ -76,12 +77,14 @@ static void DecSysRelease(decoder_sys_t *p_sys)
     if (!vlc_atomic_rc_dec(&p_sys->rc))
         return;
 
+    vlc_mutex_lock(&p_sys->aribcc_lock);
     if (p_sys->p_renderer)
         aribcc_renderer_free(p_sys->p_renderer);
     if (p_sys->p_decoder)
         aribcc_decoder_free(p_sys->p_decoder);
     if (p_sys->p_context)
         aribcc_context_free(p_sys->p_context);
+    vlc_mutex_unlock(&p_sys->aribcc_lock);
 
     free(p_sys);
 }
@@ -93,6 +96,9 @@ static void DecSysRelease(decoder_sys_t *p_sys)
 static void CopyImageToRegion(picture_t *dst_pic, const aribcc_image_t *image)
 {
     if(image->pixel_format != ARIBCC_PIXELFORMAT_RGBA8888)
+        return;
+
+    if(image->bitmap == NULL)
         return;
 
     plane_t *p_dstplane = &dst_pic->p[0];
@@ -123,15 +129,19 @@ static void SubpictureUpdate(subpicture_t *p_subpic,
                                     p_src_format->i_visible_width;
     if (b_src_changed || b_dst_changed) {
         /* don't let library freely scale using either the min of width or height ratio */
+        vlc_mutex_lock(&p_sys->aribcc_lock);
         aribcc_renderer_set_frame_size(p_sys->p_renderer, i_render_area_width,
                                                           i_render_area_height);
+        vlc_mutex_unlock(&p_sys->aribcc_lock);
     }
 
     const vlc_tick_t i_stream_date = p_spusys->i_pts + (cfg->pts - p_subpic->i_start);
 
     /* Retrieve the expected render status for detecting whether the subtitle image changed */
+    vlc_mutex_lock(&p_sys->aribcc_lock);
     aribcc_render_status_t status = aribcc_renderer_try_render(p_sys->p_renderer,
                                                                MS_FROM_VLC_TICK(i_stream_date));
+    vlc_mutex_unlock(&p_sys->aribcc_lock);
     if (status == ARIBCC_RENDER_STATUS_GOT_IMAGE_UNCHANGED) {
         /* Skip rendering since images were not changed */
         if (!b_src_changed && !b_dst_changed) {
@@ -139,9 +149,11 @@ static void SubpictureUpdate(subpicture_t *p_subpic,
         }
     }
 
+    vlc_mutex_lock(&p_sys->aribcc_lock);
     status = aribcc_renderer_render(p_sys->p_renderer,
                                     MS_FROM_VLC_TICK(i_stream_date),
                                     &p_spusys->render_result);
+    vlc_mutex_unlock(&p_sys->aribcc_lock);
     if (status == ARIBCC_RENDER_STATUS_ERROR) {
         return;
     }
@@ -218,11 +230,13 @@ static int Decode(decoder_t *p_dec, block_t *p_block)
     }
 
     aribcc_caption_t caption;
+    vlc_mutex_lock(&p_sys->aribcc_lock);
     aribcc_decode_status_t status = aribcc_decoder_decode(p_sys->p_decoder,
                                                           p_block->p_buffer,
                                                           p_block->i_buffer,
                                                           MS_FROM_VLC_TICK(p_block->i_pts),
                                                           &caption);
+    vlc_mutex_unlock(&p_sys->aribcc_lock);
     if (status == ARIBCC_DECODE_STATUS_ERROR) {
         msg_Err(p_dec, "aribcc_decoder_decode() returned with error");
     }
@@ -232,7 +246,9 @@ static int Decode(decoder_t *p_dec, block_t *p_block)
         return VLCDEC_SUCCESS;
     }
 
+    vlc_mutex_lock(&p_sys->aribcc_lock);
     aribcc_renderer_append_caption(p_sys->p_renderer, &caption);
+    vlc_mutex_unlock(&p_sys->aribcc_lock);
     aribcc_caption_cleanup(&caption);
 
 
@@ -290,8 +306,10 @@ static int Decode(decoder_t *p_dec, block_t *p_block)
 static void Flush(decoder_t *p_dec)
 {
     decoder_sys_t *p_sys = p_dec->p_sys;
+    vlc_mutex_lock(&p_sys->aribcc_lock);
     aribcc_decoder_flush(p_sys->p_decoder);
     aribcc_renderer_flush(p_sys->p_renderer);
+    vlc_mutex_unlock(&p_sys->aribcc_lock);
 }
 
 /*****************************************************************************
@@ -343,6 +361,7 @@ static int Open(vlc_object_t *p_this)
 
     p_sys->b_cfg_fadeout = var_InheritBool(p_this, ARIBCAPTION_CFG_PREFIX "fadeout");
 
+    vlc_mutex_init(&p_sys->aribcc_lock);
     vlc_mutex_init(&p_sys->dec_lock);
     p_sys->p_dec = p_dec;
 
