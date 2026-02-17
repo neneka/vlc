@@ -37,6 +37,7 @@
 
 #include <vlc_common.h>
 #include <vlc_modules.h>
+#include <vlc_image.h>
 #include <vlc_vout.h>
 #include <vlc_url.h>
 
@@ -149,8 +150,17 @@ libvlc_video_take_snapshot( libvlc_media_player_t *p_mi, unsigned num,
     var_SetInteger( p_vout, "snapshot-height", i_height );
     var_Create( p_vout, "snapshot-path", VLC_VAR_STRING );
     var_SetString( p_vout, "snapshot-path", psz_filepath );
-    var_Create( p_vout, "snapshot-format", VLC_VAR_STRING );
-    var_SetString( p_vout, "snapshot-format", "png" );
+
+    /* If the destination has an image extension, use it as snapshot format.
+     * Otherwise keep the inherited configuration value. */
+    if (image_Ext2Fourcc(psz_filepath))
+    {
+        const char *ext = strrchr(psz_filepath, '.');
+        assert(ext != NULL);
+        var_Create( p_vout, "snapshot-format", VLC_VAR_STRING );
+        var_SetString( p_vout, "snapshot-format", ext + 1 );
+    }
+
     var_TriggerCallback( p_vout, "video-snapshot" );
     vout_Release(p_vout);
     return 0;
