@@ -412,6 +412,47 @@ void vout_PutPicture(vout_thread_t *vout, picture_t *picture)
     vout_control_Wake(&sys->control);
 }
 
+static picture_t *SnapshotConvertToSoftware(vout_thread_t *vout, picture_t *picture)
+{
+    /* Try a few common software formats when snapshot export fails from a
+     * hardware/opaque source picture. */
+    static const vlc_fourcc_t candidates[] = {
+        VLC_CODEC_I420,
+        VLC_CODEC_NV12,
+        VLC_CODEC_RGB24,
+        VLC_CODEC_RGBA,
+    };
+
+    es_format_t src_fmt;
+    es_format_InitFromVideo(&src_fmt, &picture->format);
+
+    picture_t *converted = NULL;
+    filter_chain_t *chain = filter_chain_NewVideo(VLC_OBJECT(vout), false, NULL);
+    if (chain == NULL)
+    {
+        es_format_Clean(&src_fmt);
+        return NULL;
+    }
+
+    for (size_t i = 0; i < ARRAY_SIZE(candidates) && converted == NULL; ++i)
+    {
+        es_format_t dst_fmt = src_fmt;
+        dst_fmt.i_codec = candidates[i];
+        dst_fmt.video.i_chroma = candidates[i];
+
+        filter_chain_Reset(chain, &src_fmt, picture_GetVideoContext(picture), &dst_fmt);
+        if (filter_chain_AppendConverter(chain, &dst_fmt) != VLC_SUCCESS)
+            continue;
+
+        picture_Hold(picture);
+        converted = filter_chain_VideoFilter(chain, picture);
+    }
+
+    filter_chain_Delete(chain);
+    es_format_Clean(&src_fmt);
+    return converted;
+}
+
 /* */
 int vout_GetSnapshot(vout_thread_t *vout,
                      block_t **image_dst, picture_t **picture_dst,
@@ -433,9 +474,20 @@ int vout_GetSnapshot(vout_thread_t *vout,
 
         const int override_width  = var_InheritInteger(vout, "snapshot-width");
         const int override_height = var_InheritInteger(vout, "snapshot-height");
-
-        if (picture_Export(VLC_OBJECT(vout), image_dst, fmt,
-                           picture, codec, override_width, override_height, false)) {
+        int ret = picture_Export(VLC_OBJECT(vout), image_dst, fmt, picture, codec,
+                                 override_width, override_height, false);
+        if (ret != VLC_SUCCESS)
+        {
+            picture_t *fallback = SnapshotConvertToSoftware(vout, picture);
+            if (fallback != NULL)
+            {
+                ret = picture_Export(VLC_OBJECT(vout), image_dst, fmt, fallback, codec,
+                                     override_width, override_height, false);
+                picture_Release(fallback);
+            }
+        }
+        if (ret != VLC_SUCCESS)
+        {
             msg_Err(vout, "Failed to convert image for snapshot");
             picture_Release(picture);
             return VLC_EGENERIC;
@@ -1165,12 +1217,19 @@ static picture_t *ConvertRGBAAndBlend(vout_thread_sys_t *vout, picture_t *pic,
                                       vlc_render_subpicture *subpic)
 {
     vout_thread_sys_t *sys = vout;
-    /* This function will convert the pic to RGBA and blend the subpic to it.
+    /* This function will convert the pic to a software format and blend the subpic to it.
      * The returned pic can't be used to display since the chroma will be
      * different than the "vout display" one, but it can be used for snapshots.
      * */
 
     assert(sys->spu_blend);
+
+    static const vlc_fourcc_t candidates[] = {
+        VLC_CODEC_I420,
+        VLC_CODEC_NV12,
+        VLC_CODEC_RGB24,
+        VLC_CODEC_RGBA,
+    };
 
     filter_owner_t owner = {
         .video = &vout_video_cbs,
@@ -1181,36 +1240,41 @@ static picture_t *ConvertRGBAAndBlend(vout_thread_sys_t *vout, picture_t *pic,
         return NULL;
 
     es_format_t src = sys->spu_blend->fmt_out;
-    es_format_t dst = src;
-    dst.video.i_chroma = VLC_CODEC_RGBA;
+    picture_t *converted = NULL;
 
-    filter_chain_Reset(filterc, &src,
-                       NULL /* TODO output video context of blender */,
-                       &dst);
-
-    if (filter_chain_AppendConverter(filterc, &dst) != VLC_SUCCESS)
+    for (size_t i = 0; i < ARRAY_SIZE(candidates) && converted == NULL; ++i)
     {
-        filter_chain_Delete(filterc);
-        return NULL;
-    }
+        es_format_t dst = src;
+        dst.i_codec = candidates[i];
+        dst.video.i_chroma = candidates[i];
 
-    picture_Hold(pic);
-    pic = filter_chain_VideoFilter(filterc, pic);
-    filter_chain_Delete(filterc);
+        filter_chain_Reset(filterc, &src,
+                           picture_GetVideoContext(pic),
+                           &dst);
 
-    if (pic)
-    {
-        vlc_blender_t *swblend = filter_NewBlend(VLC_OBJECT(&vout->obj), &dst.video);
-        if (swblend)
+        if (filter_chain_AppendConverter(filterc, &dst) != VLC_SUCCESS)
+            continue;
+
+        picture_Hold(pic);
+        converted = filter_chain_VideoFilter(filterc, pic);
+
+        if (converted)
         {
-            bool success = picture_BlendSubpicture(pic, swblend, subpic) > 0;
-            filter_DeleteBlend(swblend);
-            if (success)
-                return pic;
+            vlc_blender_t *swblend = filter_NewBlend(VLC_OBJECT(&vout->obj), &dst.video);
+            if (swblend)
+            {
+                bool success = picture_BlendSubpicture(converted, swblend, subpic) > 0;
+                filter_DeleteBlend(swblend);
+                if (success)
+                    break;
+            }
+            picture_Release(converted);
+            converted = NULL;
         }
-        picture_Release(pic);
     }
-    return NULL;
+
+    filter_chain_Delete(filterc);
+    return converted;
 }
 
 static picture_t *FilterPictureInteractive(vout_thread_sys_t *sys)
