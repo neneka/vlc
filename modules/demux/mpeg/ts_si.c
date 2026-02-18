@@ -281,6 +281,18 @@ static void SDTCallBack( void *opaque, dvbpsi_sdt_t *p_sdt )
                     if( pD->i_service_type >= 0x01 && pD->i_service_type <= 0x10 )
                         psz_type = ppsz_type[pD->i_service_type];
                 }
+                if (p_sys->standard == TS_STANDARD_ARIB)
+                {
+                    char psz_service_id[16];
+                    char psz_network_id[16];
+                    snprintf( psz_service_id, sizeof(psz_service_id),
+                              "%"PRIu16, p_srv->i_service_id );
+                    snprintf( psz_network_id, sizeof(psz_network_id),
+                              "%"PRIu16, p_sdt->i_network_id );
+                    vlc_meta_SetExtra( p_meta, "ServiceId", psz_service_id );
+                    vlc_meta_SetExtra( p_meta, "ServiceName", str2 ? str2 : str1 );
+                    vlc_meta_SetExtra( p_meta, "ServiceNetworkId", psz_network_id );
+                }
                 free( str1 );
                 free( str2 );
             }
@@ -391,6 +403,7 @@ static void TDTCallBack( void *opaque, dvbpsi_tot_t *p_tdt )
 {
     demux_t            *p_demux = opaque;
     demux_sys_t        *p_sys = p_demux->p_sys;
+    const bool          b_first_time_meta = ( p_sys->i_network_time_update == 0 );
 
 
     p_sys->i_network_time = EITConvertStartTime( p_tdt->i_utc_time );
@@ -412,86 +425,171 @@ static void TDTCallBack( void *opaque, dvbpsi_tot_t *p_tdt )
     dvbpsi_tot_delete(p_tdt);
 
     es_out_Control( p_demux->out, ES_OUT_SET_EPG_TIME, (int64_t) p_sys->i_network_time );
+
+    if( b_first_time_meta )
+    {
+        char psz_first_network_time[32];
+        char psz_network_demux_time[32];
+        int64_t i_demux_time = -1;
+
+        if( demux_Control( p_demux, DEMUX_GET_TIME, &i_demux_time ) != VLC_SUCCESS )
+            i_demux_time = -1;
+
+        if( i_demux_time >= 0 )
+        {
+            vlc_meta_t *p_meta = vlc_meta_New();
+            if( p_meta )
+            {
+                char psz_initial_network_time[32];
+                double d_initial_network_time = (double)p_sys->i_network_time - ((double)i_demux_time / 1000000.0);
+                if( snprintf( psz_initial_network_time, sizeof(psz_initial_network_time),
+                              "%.6f", d_initial_network_time ) > 0 )
+                {
+                    vlc_meta_SetExtra( p_meta, "InitialNetworkTime", psz_initial_network_time );
+                }
+                es_out_Control( p_demux->out, ES_OUT_SET_GROUP_META, -1, p_meta );
+                vlc_meta_Delete( p_meta );
+            }
+        }
+    }
 }
 
-static void EITExtractDrDescItems( demux_t *p_demux, const dvbpsi_extended_event_dr_t *pE,
-                                   vlc_epg_event_t *p_evt )
+typedef struct
 {
-    demux_sys_t *p_sys = p_demux->p_sys;
+    uint8_t *p_key;
+    size_t i_key;
+    uint8_t *p_value;
+    size_t i_value;
+} eit_raw_desc_item_t;
 
+static bool EITRawAppend( uint8_t **pp_dst, size_t *pi_dst,
+                          const uint8_t *p_src, size_t i_src )
+{
+    if( i_src == 0 )
+        return true;
+    if( *pi_dst > SIZE_MAX - i_src )
+        return false;
+
+    uint8_t *p_realloc = realloc( *pp_dst, *pi_dst + i_src );
+    if( !p_realloc )
+        return false;
+
+    memcpy( &p_realloc[*pi_dst], p_src, i_src );
+    *pp_dst = p_realloc;
+    *pi_dst += i_src;
+    return true;
+}
+
+static void EITRawDescItemsDelete( eit_raw_desc_item_t *p_items, int i_items )
+{
+    for( int i = 0; i < i_items; i++ )
+    {
+        free( p_items[i].p_key );
+        free( p_items[i].p_value );
+    }
+    free( p_items );
+}
+
+static void EITExtractDrDescItemsRaw( const dvbpsi_extended_event_dr_t *pE,
+                                      eit_raw_desc_item_t **pp_items, int *pi_items,
+                                      int *pi_prev_item )
+{
     if( pE->i_entry_count )
     {
-        char **ppsz_prev = NULL;
-        /* Continued items from previous descriptor (ARIB) */
-        if( p_evt->i_description_items > 0 )
-            ppsz_prev = &p_evt->description_items[p_evt->i_description_items - 1].psz_value;
-
         for( int i = 0; i < pE->i_entry_count; i++ )
         {
-            char *psz_key = NULL;
-            /* Continued items have NULL key */
             const bool b_appending = ( pE->i_item_description_length[i] == 0 );
-            if( !b_appending )
-            {
-                void *p_realloc = NULL;
-                if( (size_t)p_evt->i_description_items < SIZE_MAX / sizeof(*p_evt->description_items) )
-                {
-                    p_realloc = realloc( p_evt->description_items,
-                                        (p_evt->i_description_items + 1) *
-                                         sizeof(*p_evt->description_items) );
-                }
-                if( !p_realloc )
-                {
-                    free( psz_key );
-                    break;
-                }
-                p_evt->description_items = p_realloc;
-
-                psz_key = EITConvertToUTF8( p_demux,
-                                            pE->i_item_description[i],
-                                            pE->i_item_description_length[i],
-                                            p_sys->b_broken_charset );
-                if( !psz_key )
-                {
-                    ppsz_prev = NULL;
-                    continue;
-                }
-            }
-            else if( ppsz_prev == NULL )
-                continue;
-
-            char *psz_itm = EITConvertToUTF8( p_demux,
-                                              pE->i_item[i], pE->i_item_length[i],
-                                              p_sys->b_broken_charset );
-            if( !psz_itm )
-            {
-                free( psz_key );
-                ppsz_prev = NULL;
-                continue;
-            }
-
-            msg_Dbg( p_demux, "       - desc='%s' item='%s'",
-                     psz_key ? psz_key : "(null)", psz_itm );
             if( b_appending )
             {
-                /* Continued items */
-                size_t i_total = strlen(*ppsz_prev) + strlen(psz_itm) + 1;
-                char *psz_realloc = realloc( *ppsz_prev, i_total );
-                if( psz_realloc )
-                {
-                    *ppsz_prev = psz_realloc;
-                    strcat( *ppsz_prev, psz_itm );
-                }
-                free( psz_itm );
+                /* Continued items from previous descriptor (ARIB) */
+                if( *pi_prev_item < 0 || *pi_prev_item >= *pi_items )
+                    continue;
+
+                if( !EITRawAppend( &(*pp_items)[*pi_prev_item].p_value,
+                                   &(*pp_items)[*pi_prev_item].i_value,
+                                   pE->i_item[i], pE->i_item_length[i] ) )
+                    *pi_prev_item = -1;
             }
             else
             {
-                p_evt->description_items[p_evt->i_description_items].psz_key = psz_key;
-                p_evt->description_items[p_evt->i_description_items].psz_value = psz_itm;
-                ppsz_prev = &p_evt->description_items[p_evt->i_description_items].psz_value;
-                p_evt->i_description_items++;
+                if( *pi_items >= INT_MAX ||
+                    (size_t)*pi_items >= SIZE_MAX / sizeof(**pp_items) )
+                    break;
+
+                eit_raw_desc_item_t *p_realloc =
+                    realloc( *pp_items, (*pi_items + 1) * sizeof(**pp_items) );
+                if( !p_realloc )
+                    break;
+
+                *pp_items = p_realloc;
+                (*pp_items)[*pi_items].p_key = NULL;
+                (*pp_items)[*pi_items].i_key = 0;
+                (*pp_items)[*pi_items].p_value = NULL;
+                (*pp_items)[*pi_items].i_value = 0;
+
+                if( !EITRawAppend( &(*pp_items)[*pi_items].p_key,
+                                   &(*pp_items)[*pi_items].i_key,
+                                   pE->i_item_description[i],
+                                   pE->i_item_description_length[i] ) ||
+                    !EITRawAppend( &(*pp_items)[*pi_items].p_value,
+                                   &(*pp_items)[*pi_items].i_value,
+                                   pE->i_item[i], pE->i_item_length[i] ) )
+                {
+                    free( (*pp_items)[*pi_items].p_key );
+                    free( (*pp_items)[*pi_items].p_value );
+                    break;
+                }
+
+                *pi_prev_item = *pi_items;
+                (*pi_items)++;
             }
         }
+    }
+}
+
+static void EITAttachDecodedRawDescItems( demux_t *p_demux, vlc_epg_event_t *p_evt,
+                                          const eit_raw_desc_item_t *p_items, int i_items )
+{
+    demux_sys_t *p_sys = p_demux->p_sys;
+
+    for( int i = 0; i < i_items; i++ )
+    {
+        char *psz_key = EITConvertToUTF8( p_demux, p_items[i].p_key, p_items[i].i_key,
+                                          p_sys->b_broken_charset );
+        char *psz_val = EITConvertToUTF8( p_demux, p_items[i].p_value, p_items[i].i_value,
+                                          p_sys->b_broken_charset );
+
+        if( !psz_key || !psz_val )
+        {
+            free( psz_key );
+            free( psz_val );
+            continue;
+        }
+
+        if( p_evt->i_description_items >= INT_MAX ||
+            (size_t)p_evt->i_description_items >= SIZE_MAX / sizeof(*p_evt->description_items) )
+        {
+            free( psz_key );
+            free( psz_val );
+            break;
+        }
+
+        void *p_realloc = realloc( p_evt->description_items,
+                                   (p_evt->i_description_items + 1) *
+                                   sizeof(*p_evt->description_items) );
+        if( !p_realloc )
+        {
+            free( psz_key );
+            free( psz_val );
+            break;
+        }
+
+        p_evt->description_items = p_realloc;
+        p_evt->description_items[p_evt->i_description_items].psz_key = psz_key;
+        p_evt->description_items[p_evt->i_description_items].psz_value = psz_val;
+        p_evt->i_description_items++;
+
+        msg_Dbg( p_demux, "       - desc='%s' item='%s'", psz_key, psz_val );
     }
 }
 
@@ -535,6 +633,11 @@ static void EITCallBack( void *opaque, dvbpsi_eit_t *p_eit )
         dvbpsi_descriptor_t *p_dr;
         int64_t i_start;
         int i_duration;
+        uint8_t *p_extended_text_raw = NULL;
+        size_t i_extended_text_raw = 0;
+        eit_raw_desc_item_t *p_desc_items_raw = NULL;
+        int i_desc_items_raw = 0;
+        int i_prev_desc_item = -1;
 
         i_start = EITConvertStartTime( p_evt->i_start_time );
         SI_DEBUG_TIMESHIFT(i_start);
@@ -606,32 +709,12 @@ static void EITCallBack( void *opaque, dvbpsi_eit_t *p_eit )
 
                     if( pE->i_text_length > 0 )
                     {
-                        char *psz_text = EITConvertToUTF8( p_demux,
-                                                           pE->i_text, pE->i_text_length,
-                                                           p_sys->b_broken_charset );
-                        if( psz_text )
-                        {
-                            msg_Dbg( p_demux, "       - text='%s'", psz_text );
-
-                            if( p_epgevt->psz_description )
-                            {
-                                size_t i_total = strlen( p_epgevt->psz_description ) + strlen( psz_text ) + 1;
-                                char *psz_realloc = realloc( p_epgevt->psz_description, i_total );
-                                if( psz_realloc )
-                                {
-                                    p_epgevt->psz_description = psz_realloc;
-                                    strcat( psz_realloc, psz_text );
-                                }
-                                free( psz_text );
-                            }
-                            else
-                            {
-                                p_epgevt->psz_description = psz_text;
-                            }
-                        }
+                        EITRawAppend( &p_extended_text_raw, &i_extended_text_raw,
+                                      pE->i_text, pE->i_text_length );
                     }
 
-                    EITExtractDrDescItems( p_demux, pE, p_epgevt );
+                    EITExtractDrDescItemsRaw( pE, &p_desc_items_raw,
+                                              &i_desc_items_raw, &i_prev_desc_item );
                 }
             }
                 break;
@@ -664,6 +747,22 @@ static void EITCallBack( void *opaque, dvbpsi_eit_t *p_eit )
             }
         }
 
+        if( i_extended_text_raw > 0 )
+        {
+            char *psz_text = EITConvertToUTF8( p_demux, p_extended_text_raw,
+                                               i_extended_text_raw, p_sys->b_broken_charset );
+            if( psz_text )
+            {
+                msg_Dbg( p_demux, "       - text='%s'", psz_text );
+                free( p_epgevt->psz_description );
+                p_epgevt->psz_description = psz_text;
+            }
+        }
+
+        EITAttachDecodedRawDescItems( p_demux, p_epgevt, p_desc_items_raw, i_desc_items_raw );
+        free( p_extended_text_raw );
+        EITRawDescItemsDelete( p_desc_items_raw, i_desc_items_raw );
+
         switch ( p_evt->i_running_status )
         {
             case TS_SI_RUNSTATUS_RUNNING:
@@ -687,8 +786,18 @@ static void EITCallBack( void *opaque, dvbpsi_eit_t *p_eit )
     if( i_runevt || i_fallbackevt )
         vlc_epg_SetCurrent( p_epg, (i_runevt) ? i_runevt : i_fallbackevt );
 
+    /* For EIT p/f (table_id 0x4E), if no current event was determined
+       (e.g. ARIB where running_status is always 0 and TDT may not have
+       arrived yet), use the first event as the present event per spec */
+    if( !i_runevt && !i_fallbackevt && p_eit->i_table_id == 0x4e &&
+        p_epg->i_event > 0 )
+    {
+        vlc_epg_SetCurrent( p_epg, p_epg->pp_event[0]->i_start );
+    }
+
     if( p_epg->i_event > 0 )
     {
+        p_epg->b_present = (p_eit->i_table_id == 0x4e);
         if( p_epg->b_present && p_epg->p_current )
         {
             ts_pat_t *p_pat = ts_pid_Get(&p_sys->pids, 0)->u.p_pat;
@@ -698,8 +807,8 @@ static void EITCallBack( void *opaque, dvbpsi_eit_t *p_eit )
                 p_pmt->eit.i_event_start = p_epg->p_current->i_start;
                 p_pmt->eit.i_event_length = p_epg->p_current->i_duration;
             }
+
         }
-        p_epg->b_present = (p_eit->i_table_id == 0x4e);
         es_out_Control( p_demux->out, ES_OUT_SET_GROUP_EPG, p_eit->i_extension, p_epg );
     }
     vlc_epg_Delete( p_epg );
