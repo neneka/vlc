@@ -1867,7 +1867,8 @@ static void EsOutProgramMeta(es_out_sys_t *p_sys, input_source_t *source,
     /* Check against empty meta data (empty for what we handle) */
     if( !vlc_meta_Get( p_meta, vlc_meta_Title) &&
         !vlc_meta_Get( p_meta, vlc_meta_ESNowPlaying) &&
-        !vlc_meta_Get( p_meta, vlc_meta_Publisher) )
+        !vlc_meta_Get( p_meta, vlc_meta_Publisher) &&
+        vlc_meta_GetExtraCount( p_meta ) == 0 )
     {
         return;
     }
@@ -1997,6 +1998,49 @@ static void EsOutProgramEpgEvent(es_out_sys_t *p_sys, input_source_t *source,
     input_item_SetEpgEvent( p_item, p_event );
 }
 
+#define ARIB_META_EXTRA_PREFIX "PresentEventItems:"
+
+static bool EsOutMetaExtraHasPrefix(const char *psz_name, const char *psz_prefix)
+{
+    return psz_name != NULL && psz_prefix != NULL &&
+           !strncmp(psz_name, psz_prefix, strlen(psz_prefix));
+}
+
+static void EsOutMetaClearPrefixedExtras(vlc_meta_t *p_meta, const char *psz_prefix)
+{
+    if( !p_meta )
+        return;
+
+    char **ppsz_names = vlc_meta_CopyExtraNames( p_meta );
+    if( !ppsz_names )
+        return;
+
+    for( int i = 0; ppsz_names[i] != NULL; i++ )
+    {
+        if( EsOutMetaExtraHasPrefix( ppsz_names[i], psz_prefix ) )
+            vlc_meta_SetExtra( p_meta, ppsz_names[i], NULL );
+        free( ppsz_names[i] );
+    }
+    free( ppsz_names );
+}
+
+static void EsOutInputItemClearPrefixedExtras(input_item_t *p_item, const char *psz_prefix)
+{
+    char **ppsz_names = NULL;
+    unsigned i_count = input_item_GetMetaExtraNames( p_item, &ppsz_names );
+    VLC_UNUSED(i_count);
+    if( !ppsz_names )
+        return;
+
+    for( int i = 0; ppsz_names[i] != NULL; i++ )
+    {
+        if( EsOutMetaExtraHasPrefix( ppsz_names[i], psz_prefix ) )
+            input_item_SetMetaExtra( p_item, ppsz_names[i], NULL );
+        free( ppsz_names[i] );
+    }
+    free( ppsz_names );
+}
+
 static void EsOutProgramEpg(es_out_sys_t *p_sys, input_source_t *source,
                             int i_group, const vlc_epg_t *p_epg)
 {
@@ -2034,26 +2078,113 @@ static void EsOutProgramEpg(es_out_sys_t *p_sys, input_source_t *source,
         vlc_meta_SetNowPlaying( p_pgrm->p_meta, NULL );
     }
 
+    const vlc_epg_event_t *p_current = NULL;
     vlc_mutex_lock( &p_item->lock );
+    if( p_item->p_epg_table != NULL &&
+        p_item->p_epg_table->b_present &&
+        p_item->p_epg_table->i_source_id == p_pgrm->i_id )
+    {
+        p_current = p_item->p_epg_table->p_current;
+    }
+    else
+    {
     for( int i = 0; i < p_item->i_epg; i++ )
     {
         const vlc_epg_t *p_tmp = p_item->pp_epg[i];
 
         if( p_tmp->b_present && p_tmp->i_source_id == p_pgrm->i_id )
         {
-            const char *psz_name = ( p_tmp->p_current ) ? p_tmp->p_current->psz_name : NULL;
-            if( !p_pgrm->p_meta )
-                p_pgrm->p_meta = vlc_meta_New();
-            if( p_pgrm->p_meta )
-                vlc_meta_Set( p_pgrm->p_meta, vlc_meta_ESNowPlaying, psz_name );
-            break;
+                p_current = p_tmp->p_current;
+                break;
+            }
         }
     }
     vlc_mutex_unlock( &p_item->lock );
 
+    const char *psz_name = ( p_current ) ? p_current->psz_name : NULL;
+    const char *psz_short_desc = ( p_current ) ? p_current->psz_short_description : NULL;
+    if( !p_pgrm->p_meta )
+        p_pgrm->p_meta = vlc_meta_New();
+    if( p_pgrm->p_meta )
+    {
+        vlc_meta_Set( p_pgrm->p_meta, vlc_meta_ESNowPlaying, psz_name );
+
+        char psz_event_start[32];
+        char psz_event_duration[32];
+
+        vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventName", psz_name );
+        vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventDesc", psz_short_desc );
+        if( p_current != NULL )
+        {
+            snprintf( psz_event_start, sizeof(psz_event_start),
+                      "%"PRId64, p_current->i_start );
+            snprintf( psz_event_duration, sizeof(psz_event_duration),
+                      "%"PRIu32, p_current->i_duration );
+            vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventStartAt", psz_event_start );
+            vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventDuration", psz_event_duration );
+        }
+        else
+        {
+            vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventStartAt", NULL );
+            vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventDuration", NULL );
+    }
+        vlc_meta_SetDate( p_pgrm->p_meta, NULL );
+
+        EsOutMetaClearPrefixedExtras( p_pgrm->p_meta, ARIB_META_EXTRA_PREFIX );
+        if( p_current != NULL )
+        {
+            for( int j = 0; j < p_current->i_description_items; j++ )
+            {
+                const char *psz_key = p_current->description_items[j].psz_key;
+                const char *psz_value = p_current->description_items[j].psz_value;
+                char *psz_extra_name = NULL;
+
+                if( psz_key == NULL || psz_value == NULL || *psz_key == '\0' )
+                    continue;
+                if( asprintf( &psz_extra_name, ARIB_META_EXTRA_PREFIX "%d:%s", j, psz_key ) < 0 )
+                    continue;
+                vlc_meta_SetExtra( p_pgrm->p_meta, psz_extra_name, psz_value );
+                free( psz_extra_name );
+            }
+        }
+    }
+
     /* Update selected program input info */
     if( p_pgrm == p_sys->p_pgrm )
     {
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "ServiceId",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "ServiceId" ) : NULL );
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "ServiceName",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "ServiceName" ) : NULL );
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "ServiceNetworkId",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "ServiceNetworkId" ) : NULL );
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "PresentEventName",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "PresentEventName" ) : NULL );
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "PresentEventDesc",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "PresentEventDesc" ) : NULL );
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "PresentEventStartAt",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "PresentEventStartAt" ) : NULL );
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "PresentEventDuration",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "PresentEventDuration" ) : NULL );
+
+        EsOutInputItemClearPrefixedExtras( input_priv(p_input)->p_item, ARIB_META_EXTRA_PREFIX );
+        if( p_pgrm->p_meta )
+        {
+            char **ppsz_extra_names = vlc_meta_CopyExtraNames( p_pgrm->p_meta );
+            if( ppsz_extra_names )
+            {
+                for( int i = 0; ppsz_extra_names[i] != NULL; i++ )
+                {
+                    if( EsOutMetaExtraHasPrefix( ppsz_extra_names[i], ARIB_META_EXTRA_PREFIX ) )
+                    {
+                        input_item_SetMetaExtra( input_priv(p_input)->p_item, ppsz_extra_names[i],
+                                                 vlc_meta_GetExtra( p_pgrm->p_meta, ppsz_extra_names[i] ) );
+                    }
+                    free( ppsz_extra_names[i] );
+                }
+                free( ppsz_extra_names );
+            }
+        }
         const char *psz_nowplaying = p_pgrm->p_meta ?
                                      vlc_meta_Get( p_pgrm->p_meta, vlc_meta_ESNowPlaying ) : NULL;
 
