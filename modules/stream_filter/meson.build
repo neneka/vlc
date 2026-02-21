@@ -52,3 +52,11 @@ vlc_modules += {
     'dependencies' : [aribb25_dep],
     'enabled': aribb25_dep.found(),
 }
+
+vlc_modules += {
+    'name' : 'arib_dualmono',
+    'sources' : files(
+        'arib_dualmono/arib_dualmono.cpp'
+    ),
+    'cpp_args' : ['-std=c++14']
+}

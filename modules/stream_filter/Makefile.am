@@ -53,3 +53,8 @@ stream_filter_PLUGINS += libadf_plugin.la
 
 libskiptags_plugin_la_SOURCES = stream_filter/skiptags.c
 stream_filter_PLUGINS += libskiptags_plugin.la
+
+libarib_dualmono_plugin_la_SOURCES = stream_filter/arib_dualmono/arib_dualmono.cpp
+libarib_dualmono_plugin_la_CXXFLAGS = $(AM_CXXFLAGS) -std=c++14
+libarib_dualmono_plugin_la_LIBADD = -ltsreadex
+stream_filter_PLUGINS += libarib_dualmono_plugin.la

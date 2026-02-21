@@ -2133,6 +2133,21 @@ static void PMTCallBack( void *data, dvbpsi_pmt_t *p_dvbpsipmt )
         }
     }
 
+    /* Install ARIB dualmono filter */
+    if ( p_sys->standard == TS_STANDARD_ARIB && p_sys->stream == p_demux->s )
+    {
+        stream_t *wrapper = ts_stream_wrapper_New( p_demux->s );
+        if( wrapper )
+        {
+            p_sys->stream = vlc_stream_FilterNew( wrapper, "arib_dualmono" );
+            if( !p_sys->stream )
+            {
+                vlc_stream_Delete( wrapper );
+                p_sys->stream = p_demux->s;
+            }
+        }
+    }
+
      /* Add arbitrary PID from here */
     if ( p_sys->standard == TS_STANDARD_ATSC )
     {
