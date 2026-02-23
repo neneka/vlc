@@ -461,8 +461,15 @@ static void DeleteCVPXConverter( filter_t * p_converter )
     vlc_object_delete(p_converter);
 }
 
-static pip_controller_t * CreatePipController( vout_display_t *vd, void *cbs_opaque );
+static pip_controller_t * CreatePipController( vout_display_t *vd, void *cbs_opaque,
+                                               void (*state_changed_cb)(void *, bool) );
 static void DeletePipController( pip_controller_t * pipcontroller );
+static void PictureInPictureStateChanged(void *opaque, bool is_started);
+
+static const vlc_fourcc_t sample_buffer_display_subfmts[] = {
+    VLC_CODEC_ARGB,
+    0
+};
 
 #pragma mark -
 @class VLCSampleBufferSubpicture, VLCSampleBufferDisplay;
@@ -652,12 +659,14 @@ shouldInheritContentsScale:(CGFloat)newScale
     @property (nonatomic) VLCSampleBufferSubpictureView *spuView;
     @property (nonatomic) VLCSampleBufferSubpicture *subpicture;
     @property (nonatomic) id<VLCPixelBufferRotationContext> rotationContext;
+    @property (atomic) BOOL pictureInPictureStarted;
 
     @property (nonatomic, readonly) pip_controller_t *pipcontroller;
 
     - (instancetype)init NS_UNAVAILABLE;
     + (instancetype)new NS_UNAVAILABLE;
     - (instancetype)initWithVoutDisplay:(vout_display_t *)vd;
+    - (void)handlePictureInPictureStateChange:(BOOL)isStarted;
 @end
 
 @implementation VLCSampleBufferDisplay
@@ -693,7 +702,8 @@ shouldInheritContentsScale:(CGFloat)newScale
 
     _window = window;
 
-    _pipcontroller = CreatePipController(vd, (__bridge void *)self);
+    _pipcontroller = CreatePipController(vd, (__bridge void *)self,
+                                         PictureInPictureStateChanged);
 
     _vd = vd;
 
@@ -754,6 +764,21 @@ shouldInheritContentsScale:(CGFloat)newScale
     });
     DeletePipController(_pipcontroller);
     _pipcontroller = NULL;
+}
+
+- (void)handlePictureInPictureStateChange:(BOOL)isStarted
+{
+    self.pictureInPictureStarted = isStarted;
+    if (isStarted)
+        self.vd->info.subpicture_chromas = NULL;
+    else
+        self.vd->info.subpicture_chromas = sample_buffer_display_subfmts;
+
+    /* Force the on-screen SPU view to clear stale regions immediately. */
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.spuView drawSubpicture:nil];
+        self.spuView.hidden = isStarted;
+    });
 }
 
 @end
@@ -1011,11 +1036,13 @@ static bool IsSubpictureDrawNeeded(vout_display_t *vd, const vlc_render_subpictu
 
 static void RenderSubpicture(vout_display_t *vd, const vlc_render_subpicture *spu)
 {
-    if (!IsSubpictureDrawNeeded(vd, spu))
-        return;
-
     VLCSampleBufferDisplay *sys;
     sys = (__bridge VLCSampleBufferDisplay*)vd->sys;
+    if (sys.pictureInPictureStarted)
+        return;
+
+    if (!IsSubpictureDrawNeeded(vd, spu))
+        return;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [sys.spuView drawSubpicture:sys.subpicture];
@@ -1045,9 +1072,12 @@ static void Display(vout_display_t *vd, picture_t *pic)
     // kept as the core is not properly pacing the calls to Prepare without this callback
 }
 
-static pip_controller_t * CreatePipController( vout_display_t *vd, void *cbs_opaque )
+static pip_controller_t * CreatePipController( vout_display_t *vd, void *cbs_opaque,
+                                               void (*state_changed_cb)(void *, bool) )
 {
     pip_controller_t *pip_controller = vlc_object_create(vd, sizeof(pip_controller_t));
+    pip_controller->state_cb_opaque = cbs_opaque;
+    pip_controller->state_changed_cb = state_changed_cb;
 
     module_t **mods;
     ssize_t total = vlc_module_match("pictureinpicture", NULL, false, &mods, NULL);
@@ -1065,6 +1095,12 @@ static pip_controller_t * CreatePipController( vout_display_t *vd, void *cbs_opa
     free(mods);
     vlc_object_delete(pip_controller);
     return NULL;
+}
+
+static void PictureInPictureStateChanged(void *opaque, bool is_started)
+{
+    VLCSampleBufferDisplay *sys = (__bridge VLCSampleBufferDisplay *)opaque;
+    [sys handlePictureInPictureStateChange:is_started];
 }
 
 static void DeletePipController( pip_controller_t * pip_controller )
@@ -1140,12 +1176,7 @@ static int Open (vout_display_t *vd,
 
         vd->ops = &ops;
 
-        static const vlc_fourcc_t subfmts[] = {
-            VLC_CODEC_ARGB,
-            0
-        };
-
-        vd->info.subpicture_chromas = subfmts;
+        vd->info.subpicture_chromas = sample_buffer_display_subfmts;
 
         return VLC_SUCCESS;
     }
