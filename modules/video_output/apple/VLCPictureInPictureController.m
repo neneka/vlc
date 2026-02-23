@@ -208,11 +208,15 @@ API_AVAILABLE(ios(15.0), tvos(15.0), macosx(12.0))
 }
 
 - (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    if (_pipcontroller->state_changed_cb != NULL)
+        _pipcontroller->state_changed_cb(_pipcontroller->state_cb_opaque, true);
     if (_stateChangeEventHandler)
         _stateChangeEventHandler(YES);
 }
 
 - (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    if (_pipcontroller->state_changed_cb != NULL)
+        _pipcontroller->state_changed_cb(_pipcontroller->state_cb_opaque, false);
     if(_stateChangeEventHandler)
         _stateChangeEventHandler(NO);
 }
@@ -295,6 +299,9 @@ static bool PipControllerMediaIsPlaying(void *opaque) {
 
 static int CloseController( pip_controller_t *pipcontroller )
 {
+    pipcontroller->state_changed_cb = NULL;
+    pipcontroller->state_cb_opaque = NULL;
+
     if (@available(macOS 12.0, iOS 15.0, tvos 15.0, *)) {
         VLCPictureInPictureController *sys = 
             (__bridge_transfer VLCPictureInPictureController*)pipcontroller->p_sys;

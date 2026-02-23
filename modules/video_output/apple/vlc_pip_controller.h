@@ -51,6 +51,8 @@ struct pip_controller_t
     struct vlc_object_t obj;
 
     void               *p_sys;
+    void               *state_cb_opaque;
+    void               (*state_changed_cb)(void *opaque, bool is_started);
 
     const struct pip_controller_operations *ops;
     const struct pip_controller_media_callbacks *media_cbs;
