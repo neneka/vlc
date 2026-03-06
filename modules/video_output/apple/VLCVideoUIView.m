@@ -274,8 +274,14 @@
 {
     assert(_enabled);
     _subviews++;
-    if (_subviews == 1)
+    if (_subviews == 1) {
+        /* Update the frame to the current viewContainer bounds before
+         * re-adding to the view hierarchy. The frame may be stale if
+         * the viewContainer was resized while this view was detached
+         * (e.g. switching between mini player and expanded mode). */
+        self.frame = self.viewContainerBounds;
         [_viewContainer addSubview:self];
+    }
 
     VLC_UNUSED(subview);
 }
@@ -336,9 +342,19 @@
 
 - (void)didMoveToWindow
 {
-    #if !defined(TARGET_OS_VISION) || !TARGET_OS_VISION
-        self.contentScaleFactor = self.window.screen.scale;
-    #endif
+    /* Only update when moving TO a window, not when being removed.
+     * When self.window is nil (e.g. going to background or off-screen),
+     * updating the frame and contentScaleFactor can leave the display
+     * in an inconsistent state, causing a persistent black screen. */
+    if (self.window) {
+        /* Ensure the frame matches the viewContainer in case it was
+         * resized while this view was not in the hierarchy. */
+        self.frame = self.viewContainerBounds;
+        #if !defined(TARGET_OS_VISION) || !TARGET_OS_VISION
+            self.contentScaleFactor = self.window.screen.scale;
+        #endif
+        [self reshape];
+    }
 }
 
 - (void)layoutSubviews
