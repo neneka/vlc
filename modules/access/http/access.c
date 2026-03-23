@@ -189,6 +189,7 @@ static int Open(vlc_object_t *obj)
 
     if (sys->resource == NULL)
         goto error;
+    sys->resource->item = access->p_input_item;
 
     ret = vlc_credential_get(&crd, obj, NULL, NULL, NULL, NULL);
     if (ret == 0) {

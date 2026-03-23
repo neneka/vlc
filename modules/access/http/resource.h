@@ -31,6 +31,7 @@
 struct vlc_http_msg;
 struct vlc_http_mgr;
 struct vlc_http_resource;
+struct input_item_t;
 
 struct vlc_http_resource_cbs
 {
@@ -57,6 +58,7 @@ struct vlc_http_resource
     char *agent;
     char *referrer;
     char *token;
+    struct input_item_t *item;
 };
 
 int vlc_http_res_init(struct vlc_http_resource *,

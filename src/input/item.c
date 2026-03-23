@@ -415,6 +415,7 @@ void input_item_Release( input_item_t *p_item )
 
     free( p_item->psz_name );
     free( p_item->psz_uri );
+    free( p_item->psz_http_headers );
     free( p_item->p_stats );
     vlc_meta_Delete( p_item->p_meta );
 
@@ -1005,6 +1006,7 @@ input_item_NewExt( const char *psz_uri, const char *psz_name,
     }
 
     TAB_INIT( p_input->i_options, p_input->ppsz_options );
+    p_input->psz_http_headers = NULL;
     p_input->optflagc = 0;
     p_input->optflagv = NULL;
     p_input->opaques = NULL;
@@ -1075,6 +1077,9 @@ input_item_t *input_item_Copy( input_item_t *p_input )
         }
         vlc_vector_push(&item->es_vec, cpy_item_es);
     }
+
+    if (p_input->psz_http_headers != NULL)
+        item->psz_http_headers = strdup(p_input->psz_http_headers);
 
     vlc_mutex_unlock( &p_input->lock );
 

@@ -129,6 +129,7 @@ struct input_item_t
     enum input_item_type_e i_type;   /**< Type (file, disc, ... see input_item_type_e) */
     bool        b_net;               /**< Net: always true for TYPE_STREAM, it
                                           depends for others types */
+    char        *psz_http_headers;   /**< Serialized custom HTTP request headers */
 
     void        *libvlc_owner;       /**< LibVLC private data, can only be set
                                           before events are registered. */
