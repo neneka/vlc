@@ -584,6 +584,30 @@ LIBVLC_API void
 LIBVLC_API void *libvlc_media_get_user_data( libvlc_media_t *p_md );
 
 /**
+ * Sets serialized custom HTTP request headers for this media descriptor.
+ *
+ * The string is expected to contain one header per line in the form
+ * "Header-Name: value", separated by '\n'. Passing NULL or an empty string
+ * clears all custom headers.
+ *
+ * \param p_md media descriptor object
+ * \param psz_headers serialized headers string or NULL
+ */
+LIBVLC_API void
+libvlc_media_set_http_headers( libvlc_media_t *p_md, const char *psz_headers );
+
+/**
+ * Gets serialized custom HTTP request headers from this media descriptor.
+ *
+ * The returned value must be released with libvlc_free().
+ *
+ * \param p_md media descriptor object
+ * \return heap-allocated serialized headers string or NULL
+ */
+LIBVLC_API char *
+libvlc_media_get_http_headers( libvlc_media_t *p_md );
+
+/**
  * Get the track list for one type
  *
  * \version LibVLC 4.0.0 and later.

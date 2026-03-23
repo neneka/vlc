@@ -129,6 +129,7 @@ struct input_item_t
     enum input_item_type_e i_type;   /**< Type (file, disc, ... see input_item_type_e) */
     bool        b_net;               /**< Net: always true for TYPE_STREAM, it
                                           depends for others types */
+    char        *psz_http_headers;   /**< Serialized custom HTTP request headers */
 };
 
 #define INPUT_ITEM_URI_NOP "vlc://nop" /* dummy URI for node/directory items */

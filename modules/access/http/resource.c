@@ -30,11 +30,54 @@
 #include <string.h>
 
 #include <vlc_common.h>
+#include <vlc_input_item.h>
 #include <vlc_url.h>
 #include <vlc_strings.h>
 #include "message.h"
 #include "connmgr.h"
 #include "resource.h"
+
+static void vlc_http_res_add_custom_headers(struct vlc_http_msg *req,
+                                            char *headers)
+{
+    if (headers == NULL || headers[0] == '\0')
+        return;
+
+    char *saveptr = NULL;
+    for (char *line = strtok_r(headers, "\n", &saveptr);
+         line != NULL;
+         line = strtok_r(NULL, "\n", &saveptr))
+    {
+        while (*line == ' ' || *line == '\t' || *line == '\r')
+            line++;
+
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == ' '
+                        || line[len - 1] == '\t'))
+            line[--len] = '\0';
+        if (len == 0)
+            continue;
+
+        char *sep = strchr(line, ':');
+        if (sep == NULL)
+            continue;
+
+        *sep++ = '\0';
+        while (*sep == ' ' || *sep == '\t')
+            sep++;
+        if (*sep == '\0')
+            continue;
+
+        len = strlen(line);
+        while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t'))
+            line[--len] = '\0';
+        if (len == 0)
+            continue;
+
+        vlc_http_msg_add_header(req, line, "%s", sep);
+    }
+
+}
 
 static struct vlc_http_msg *
 vlc_http_res_req(const struct vlc_http_resource *res, void *opaque)
@@ -69,6 +112,22 @@ vlc_http_res_req(const struct vlc_http_resource *res, void *opaque)
 
     if (res->referrer != NULL) /* TODO: validate URL */
         vlc_http_msg_add_header(req, "Referer", "%s", res->referrer);
+
+    if (res->item != NULL)
+    {
+        char *headers = NULL;
+
+        vlc_mutex_lock(&res->item->lock);
+        if (res->item->psz_http_headers != NULL)
+            headers = strdup(res->item->psz_http_headers);
+        vlc_mutex_unlock(&res->item->lock);
+
+        if (headers != NULL)
+        {
+            vlc_http_res_add_custom_headers(req, headers);
+            free(headers);
+        }
+    }
 
     vlc_http_msg_add_cookies(req, vlc_http_mgr_get_jar(res->manager));
 
@@ -209,6 +268,7 @@ int vlc_http_res_init(struct vlc_http_resource *restrict res,
     res->agent = (ua != NULL) ? strdup(ua) : NULL;
     res->referrer = (ref != NULL) ? strdup(ref) : NULL;
     res->token = NULL;
+    res->item = NULL;
 
     const char *path = url.psz_path;
     if (path == NULL)

@@ -618,6 +618,36 @@ libvlc_media_get_user_data( libvlc_media_t * p_md )
     return p_md->p_user_data;
 }
 
+void
+libvlc_media_set_http_headers( libvlc_media_t *p_md, const char *psz_headers )
+{
+    assert( p_md );
+    input_item_t *p_input_item = p_md->p_input_item;
+
+    vlc_mutex_lock( &p_input_item->lock );
+    free( p_input_item->psz_http_headers );
+    if (psz_headers != NULL && psz_headers[0] != '\0')
+        p_input_item->psz_http_headers = strdup(psz_headers);
+    else
+        p_input_item->psz_http_headers = NULL;
+    vlc_mutex_unlock( &p_input_item->lock );
+}
+
+char *
+libvlc_media_get_http_headers( libvlc_media_t *p_md )
+{
+    assert( p_md );
+    input_item_t *p_input_item = p_md->p_input_item;
+
+    vlc_mutex_lock( &p_input_item->lock );
+    char *psz_headers = p_input_item->psz_http_headers != NULL
+                      ? strdup(p_input_item->psz_http_headers)
+                      : NULL;
+    vlc_mutex_unlock( &p_input_item->lock );
+
+    return psz_headers;
+}
+
 libvlc_media_tracklist_t *
 libvlc_media_get_tracklist( libvlc_media_t *p_md, libvlc_track_type_t type )
 {
