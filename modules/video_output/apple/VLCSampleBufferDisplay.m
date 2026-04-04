@@ -543,6 +543,14 @@ static const vlc_fourcc_t sample_buffer_display_subfmts[] = {
 
     CGContextClearRect(cgCtx, self.bounds);
 
+    /* Capture a strong local reference to the pending subpicture so that
+     * a concurrent update from the VLC rendering thread cannot swap it
+     * (and release the underlying CGImageRef) while we are iterating
+     * over the regions. Without this, a window resize can cause
+     * EXC_BAD_ACCESS (code=1) in CGContextDrawImage. */
+    VLCSampleBufferSubpicture *subpicture = _pendingSubpicture;
+    NSArray<VLCSampleBufferSubpictureRegion *> *regions = subpicture.regions;
+
 #if TARGET_OS_IPHONE
     CGContextSaveGState(cgCtx);
     CGAffineTransform translate = CGAffineTransformTranslate(CGAffineTransformIdentity, 0.0, self.frame.size.height);
@@ -550,15 +558,17 @@ static const vlc_fourcc_t sample_buffer_display_subfmts[] = {
     CGAffineTransform transform = CGAffineTransformScale(translate, scale, -scale);
     CGContextConcatCTM(cgCtx, transform);
 #endif
-    VLCSampleBufferSubpictureRegion *region;
-    for (region in _pendingSubpicture.regions) {
+    for (VLCSampleBufferSubpictureRegion *region in regions) {
+        CGImageRef image = region.image;
+        if (!image)
+            continue;
 #if TARGET_OS_OSX
         CGRect regionFrame = [self convertRectFromBacking:region.backingFrame];
 #else
         CGRect regionFrame = region.backingFrame;
 #endif
         CGContextSetAlpha(cgCtx, region.alpha);
-        CGContextDrawImage(cgCtx, regionFrame, region.image);
+        CGContextDrawImage(cgCtx, regionFrame, image);
     }
 #if TARGET_OS_IPHONE
     CGContextRestoreGState(cgCtx);
