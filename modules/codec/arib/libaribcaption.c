@@ -121,12 +121,19 @@ static void SubpictureUpdate(subpicture_t *p_subpic,
     const video_format_t *p_dst_format = cfg->current.video_dst;
 
     bool b_src_changed = p_src_format->i_visible_width  != cfg->previous.video_src->i_visible_width ||
-                         p_src_format->i_visible_height != cfg->previous.video_src->i_visible_height;
+                         p_src_format->i_visible_height != cfg->previous.video_src->i_visible_height ||
+                         p_src_format->i_sar_num != cfg->previous.video_src->i_sar_num ||
+                         p_src_format->i_sar_den != cfg->previous.video_src->i_sar_den;
     bool b_dst_changed = !video_format_IsSimilar(cfg->previous.video_dst, p_dst_format);
 
-    unsigned i_render_area_width  = p_dst_format->i_visible_width;
-    unsigned i_render_area_height = p_src_format->i_visible_height * p_dst_format->i_visible_width /
-                                    p_src_format->i_visible_width;
+    unsigned i_sar_num = p_src_format->i_sar_num > 0 ? p_src_format->i_sar_num : 1;
+    unsigned i_sar_den = p_src_format->i_sar_den > 0 ? p_src_format->i_sar_den : 1;
+
+    unsigned i_render_area_height = p_dst_format->i_visible_height & ~3;
+    unsigned i_render_area_width = (uint64_t)i_render_area_height *
+                                   p_src_format->i_visible_width * i_sar_num /
+                                   (p_src_format->i_visible_height * i_sar_den) & ~3;
+
     if (b_src_changed || b_dst_changed) {
         /* don't let library freely scale using either the min of width or height ratio */
         vlc_mutex_lock(&p_sys->aribcc_lock);
