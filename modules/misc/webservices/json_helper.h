@@ -85,19 +85,19 @@ struct json_helper_sys {
     size_t size;
 };
 
-void json_parse_error(void *data, const char *msg)
+static void json_helper_parse_error(void *data, const char *msg)
 {
     struct json_helper_sys *sys = data;
 
     vlc_error(sys->logger, "%s", msg);
 }
 
-size_t json_read(void *data, void *buf, size_t size)
+static size_t json_helper_read(void *data, void *buf, size_t size)
 {
     struct json_helper_sys *sys = data;
 
     /* Read the smallest number of byte between size and the string length */
-    size_t s = size < sys->size ? size : sys->size; 
+    size_t s = size < sys->size ? size : sys->size;
     memcpy(buf, sys->buffer, s);
 
     sys->buffer += s;

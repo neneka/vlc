@@ -211,15 +211,15 @@ value:
 
 %%
 
-int json_parse(void *opaque, struct json_object *result)
+int json_parse(struct json_parse_sys *sys, struct json_object *result)
 {
 	void *scanner;
-	int ret = jsonlex_init_extra(opaque, &scanner);
+	int ret = jsonlex_init_extra(sys, &scanner);
 
 	if (ret)
 		return ret;
 
-	ret = yyparse(opaque, scanner, result);
+	ret = yyparse(sys, scanner, result);
 	jsonlex_destroy(scanner);
 	return ret;
 }
