@@ -318,7 +318,7 @@ serdes_Serialize(struct vlc_preparser_msg_serdes *serdes,
 /**
  * JSON read callback
  */
-size_t json_read(void *opaque, void *buf, size_t max)
+static size_t serdes_json_read(void *opaque, void *buf, size_t max)
 {
     assert(opaque != NULL);
     assert(buf != NULL);
@@ -336,7 +336,7 @@ size_t json_read(void *opaque, void *buf, size_t max)
     return ret;
 }
 
-void json_parse_error(void *opaque, const char *msg)
+static void serdes_json_parse_error(void *opaque, const char *msg)
 {
     assert(opaque != NULL);
     assert(msg != NULL);
@@ -360,8 +360,13 @@ serdes_Deserialize(struct vlc_preparser_msg_serdes *serdes,
     sys->size = 0;
     sys->parent = serdes;
 
+    struct json_parse_sys json_sys;
+    json_sys.opaque = sys;
+    json_sys.pf_read = serdes_json_read;
+    json_sys.pf_error = serdes_json_parse_error;
+
     struct json_object obj;
-    if (json_parse(sys, &obj) != 0) {
+    if (json_parse(&json_sys, &obj) != 0) {
         return sys->error;
     }
 

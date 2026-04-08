@@ -50,14 +50,14 @@ struct ytdl_json {
     int fd;
 };
 
-void json_parse_error(void *data, const char *msg)
+static void ytdl_json_parse_error(void *data, const char *msg)
 {
     struct ytdl_json *sys = data;
 
     vlc_error(sys->logger, "%s", msg);
 }
 
-size_t json_read(void *data, void *buf, size_t size)
+static size_t ytdl_json_read(void *data, void *buf, size_t size)
 {
     struct ytdl_json *sys = data;
 
@@ -405,7 +405,12 @@ static int OpenCommon(vlc_object_t *obj, const char *src_url)
 
     free(path);
 
-    int val = json_parse(&jsdata, &sys->json);
+    struct json_parse_sys json_sys;
+    json_sys.opaque = &jsdata;
+    json_sys.pf_read = ytdl_json_read;
+    json_sys.pf_error = ytdl_json_parse_error;
+
+    int val = json_parse(&json_sys, &sys->json);
 
     kill(pid, SIGTERM);
     vlc_close(jsdata.fd);

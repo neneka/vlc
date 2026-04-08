@@ -61,11 +61,17 @@ struct json_member {
     struct json_value value;
 };
 
+struct json_parse_sys {
+    void *opaque;
+    size_t (*pf_read)(void *opaque, void *buf, size_t max);
+    void (*pf_error)(void *opaque, const char *msg);
+};
+
 size_t json_read(void *opaque, void *buf, size_t max);
 void json_parse_error(void *opaque, const char *msg);
 char *json_unescape(const char *, size_t);
 
-int json_parse(void *opaque, struct json_object *result);
+int json_parse(struct json_parse_sys *sys, struct json_object *result);
 void json_free(struct json_object *);
 
 const struct json_value *json_get(const struct json_object *obj,

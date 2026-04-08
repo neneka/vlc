@@ -61,10 +61,15 @@ static musicbrainz_lookup_t * musicbrainz_lookup(vlc_object_t *p_obj, const char
         return NULL;
     }
 
-    struct json_helper_sys sys;
-    sys.logger = p_obj->logger;
-    sys.buffer = p_buffer;
-    sys.size = i_buffer;
+    struct json_helper_sys jsdata;
+    jsdata.logger = p_obj->logger;
+    jsdata.buffer = p_buffer;
+    jsdata.size = i_buffer;
+
+    struct json_parse_sys sys;
+    sys.opaque = &jsdata;
+    sys.pf_read = json_helper_read;
+    sys.pf_error = json_helper_parse_error;
 
     int val = json_parse(&sys, &p_lookup->json);
     free(p_buffer);

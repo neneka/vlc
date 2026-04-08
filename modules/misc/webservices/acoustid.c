@@ -89,10 +89,15 @@ static void parse_recordings( vlc_object_t *p_obj, const struct json_object *obj
 static bool ParseJson( vlc_object_t *p_obj, const void *p_buffer, size_t i_buffer,
                        acoustid_results_t *p_results )
 {
-    struct json_helper_sys sys;
-    sys.logger = p_obj->logger;
-    sys.buffer = p_buffer;
-    sys.size = i_buffer;
+    struct json_helper_sys jsdata;
+    jsdata.logger = p_obj->logger;
+    jsdata.buffer = p_buffer;
+    jsdata.size = i_buffer;
+
+    struct json_parse_sys sys;
+    sys.opaque = &jsdata;
+    sys.pf_read = json_helper_read;
+    sys.pf_error = json_helper_parse_error;
 
     struct json_object json;
     int val = json_parse(&sys, &json);

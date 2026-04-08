@@ -58,7 +58,7 @@ struct chromecast_ctrl_json {
     const char *string;
 };
 
-void json_parse_error(void *data, const char *msg)
+static void chromecast_json_parse_error(void *data, const char *msg)
 {
     vlc_assert(data != NULL);
 
@@ -66,7 +66,7 @@ void json_parse_error(void *data, const char *msg)
     vlc_error(sys->logger, "%s", msg);
 }
 
-size_t json_read(void *data, void *buf, size_t size)
+static size_t chromecast_json_read(void *data, void *buf, size_t size)
 {
     vlc_assert(data != NULL);
     vlc_assert(buf != NULL);
@@ -75,7 +75,7 @@ size_t json_read(void *data, void *buf, size_t size)
     size_t len = strlen(sys->string);
 
     /* Read the smallest number of byte between size and the string length */
-    size_t s = size < len ? size : len; 
+    size_t s = size < len ? size : len;
     memcpy(buf, sys->string, s);
 
     sys->string += s;
@@ -610,9 +610,14 @@ bool intf_sys_t::processMessage(const castchannel::CastMessage &msg)
         return true;
     }
 
-    struct chromecast_ctrl_json sys;
-    sys.logger = m_module->logger;
-    sys.string = msg.payload_utf8().c_str();
+    struct chromecast_ctrl_json jsdata;
+    jsdata.logger = m_module->logger;
+    jsdata.string = msg.payload_utf8().c_str();
+
+    struct json_parse_sys sys;
+    sys.opaque = &jsdata;
+    sys.pf_read = chromecast_json_read;
+    sys.pf_error = chromecast_json_parse_error;
 
     struct json_object json;
     int val = json_parse(&sys, &json);

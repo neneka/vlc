@@ -31,6 +31,18 @@
 #include <vlc_charset.h>
 #include "json.h"
 
+size_t json_read(void *data, void *buf, size_t max)
+{
+    struct json_parse_sys *sys = data;
+    return sys->pf_read(sys->opaque, buf, max);
+}
+
+void json_parse_error(void *data, const char *msg)
+{
+    struct json_parse_sys *sys = data;
+    sys->pf_error(sys->opaque, msg);
+}
+
 #ifdef WORDS_BIGENDIAN
 # define ENDIAN(x) x "BE"
 #else
