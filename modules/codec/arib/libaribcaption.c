@@ -64,6 +64,8 @@ typedef struct
     decoder_sys_t         *p_dec_sys;
     vlc_tick_t             i_pts;
     aribcc_render_result_t render_result;
+    char                  *psz_text;
+    bool                   b_callback_called;
 } libaribcaption_spu_updater_sys_t;
 
 
@@ -117,6 +119,30 @@ static void SubpictureUpdate(subpicture_t *p_subpic,
 {
     libaribcaption_spu_updater_sys_t *p_spusys = p_subpic->updater.sys;
     decoder_sys_t *p_sys = p_spusys->p_dec_sys;
+
+    if (!p_spusys->b_callback_called) {
+        vlc_mutex_lock(&p_sys->dec_lock);
+        if (p_sys->p_dec) {
+                vlc_object_t *obj = VLC_OBJECT(p_sys->p_dec);
+                void (*cb)(const char*, void*) = NULL;
+                void *opaque = NULL;
+
+                while (obj != NULL) {
+                    if (var_Type(obj, "arib-text-cb") != 0) {
+                        cb = (void(*)(const char*, void*))var_GetAddress(obj, "arib-text-cb");
+                        opaque = var_GetAddress(obj, "arib-text-opaque");
+                        break;
+                    }
+                    obj = vlc_object_parent(obj);
+                }
+                if (cb) {
+                    cb(p_spusys->psz_text, opaque);
+                }
+                p_spusys->b_callback_called = true;
+        }
+        vlc_mutex_unlock(&p_sys->dec_lock);
+    }
+
     const video_format_t *p_src_format = cfg->current.video_src;
     const video_format_t *p_dst_format = cfg->current.video_dst;
 
@@ -218,6 +244,7 @@ static void SubpictureDestroy(subpicture_t *p_subpic)
 {
     libaribcaption_spu_updater_sys_t *p_spusys = p_subpic->updater.sys;
     DecSysRelease(p_spusys->p_dec_sys);
+    free(p_spusys->psz_text);
     free(p_spusys);
 }
 
@@ -256,17 +283,20 @@ static int Decode(decoder_t *p_dec, block_t *p_block)
     vlc_mutex_lock(&p_sys->aribcc_lock);
     aribcc_renderer_append_caption(p_sys->p_renderer, &caption);
     vlc_mutex_unlock(&p_sys->aribcc_lock);
-    aribcc_caption_cleanup(&caption);
-
 
     libaribcaption_spu_updater_sys_t *p_spusys = malloc(sizeof(libaribcaption_spu_updater_sys_t));
     if (!p_spusys) {
+        aribcc_caption_cleanup(&caption);
         block_Release(p_block);
         return VLCDEC_SUCCESS;
     }
     p_spusys->p_dec_sys = p_sys;
     p_spusys->i_pts = p_block->i_pts;
     memset(&p_spusys->render_result, 0, sizeof(p_spusys->render_result));
+    p_spusys->psz_text = (caption.text && *caption.text) ? strdup(caption.text) : NULL;
+    p_spusys->b_callback_called = false;
+
+    aribcc_caption_cleanup(&caption);
 
     static const struct vlc_spu_updater_ops spu_ops =
     {
@@ -317,6 +347,23 @@ static void Flush(decoder_t *p_dec)
     aribcc_decoder_flush(p_sys->p_decoder);
     aribcc_renderer_flush(p_sys->p_renderer);
     vlc_mutex_unlock(&p_sys->aribcc_lock);
+
+    /* Notify the app that the subtitle has been cleared (e.g. on seek) */
+    vlc_object_t *obj = VLC_OBJECT(p_dec);
+    void (*cb)(const char*, void*) = NULL;
+    void *opaque = NULL;
+
+    while (obj != NULL) {
+        if (var_Type(obj, "arib-text-cb") != 0) {
+            cb = (void(*)(const char*, void*))var_GetAddress(obj, "arib-text-cb");
+            opaque = var_GetAddress(obj, "arib-text-opaque");
+            break;
+        }
+        obj = vlc_object_parent(obj);
+    }
+
+    if (cb)
+        cb("", opaque);
 }
 
 /*****************************************************************************
