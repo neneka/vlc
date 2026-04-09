@@ -263,6 +263,7 @@ libvlc_video_set_adjust_float
 libvlc_video_set_adjust_int
 libvlc_video_set_aspect_ratio
 libvlc_video_set_callbacks
+libvlc_video_set_arib_text_callbacks
 libvlc_video_set_crop_ratio
 libvlc_video_set_crop_window
 libvlc_video_set_crop_border

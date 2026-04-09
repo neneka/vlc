@@ -47,6 +47,9 @@ struct libvlc_media_player_t
     vlc_player_aout_listener_id *aout_listener;
     vlc_cond_t wait;
 
+    libvlc_video_arib_text_cb arib_text_cb;
+    void *arib_text_opaque;
+
     struct libvlc_instance_t * p_libvlc_instance; /* Parent instance */
 
     struct {

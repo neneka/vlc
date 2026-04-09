@@ -1165,6 +1165,23 @@ void libvlc_video_set_callbacks( libvlc_media_player_t *mp,
     var_SetString( mp, "window", "dummy" );
 }
 
+
+
+void libvlc_video_set_arib_text_callbacks( libvlc_media_player_t *mp,
+                                           libvlc_video_arib_text_cb cb,
+                                           void *opaque )
+{
+    libvlc_instance_t *p_libvlc = mp->p_libvlc_instance;
+
+    if (var_Type(p_libvlc->p_libvlc_int, "arib-text-cb") == 0)
+        var_Create(p_libvlc->p_libvlc_int, "arib-text-cb", VLC_VAR_ADDRESS);
+    var_SetAddress(p_libvlc->p_libvlc_int, "arib-text-cb", (void*)cb);
+
+    if (var_Type(p_libvlc->p_libvlc_int, "arib-text-opaque") == 0)
+        var_Create(p_libvlc->p_libvlc_int, "arib-text-opaque", VLC_VAR_ADDRESS);
+    var_SetAddress(p_libvlc->p_libvlc_int, "arib-text-opaque", opaque);
+}
+
 void libvlc_video_set_format_callbacks( libvlc_media_player_t *mp,
                                         libvlc_video_format_cb setup,
                                         libvlc_video_cleanup_cb cleanup )
