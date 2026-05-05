@@ -2270,10 +2270,18 @@ int ProbeEnd( demux_t *p_demux, int i_program )
 
         int i_count = ProbeChunk( p_demux, i_program, true, &b_found );
         if( i_count < PROBE_CHUNK_COUNT )
-            break;
-
-        /* Go ahead one more chunk if end of file contained only stuffing packets */
-        i_probe_count += i_count;
+        {
+            /* Reported stream size can exceed the actual TS payload size.
+             * When the backward probe lands near the real end of content,
+             * ProbeChunk may hit EOF before reading a full chunk. Retry from
+             * a further-back position before giving up. */
+            i_probe_count += PROBE_CHUNK_COUNT;
+        }
+        else
+        {
+            /* Go ahead one more chunk if end of file contained only stuffing packets */
+            i_probe_count += i_count;
+        }
     } while( i_pos > 0 && !b_found &&
              i_probe_count < PROBE_MAX );
 
