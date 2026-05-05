@@ -2245,9 +2245,11 @@ static void PMTCallBack( void *data, dvbpsi_pmt_t *p_dvbpsipmt )
     UpdatePESFilters( p_demux, p_sys->seltype == PROGRAM_ALL );
 
     /* Probe Boundaries */
-    if( p_sys->b_canseek && !p_pmt->b_last_dts_probed )
+    if( p_sys->b_canseek &&
+        (!p_pmt->b_last_dts_probed || p_pmt->i_last_dts == VLC_TICK_INVALID) )
     {
-        ProbeStart( p_demux, p_pmt->i_number );
+        if( !p_pmt->b_last_dts_probed )
+            ProbeStart( p_demux, p_pmt->i_number );
         ProbeEnd( p_demux, p_pmt->i_number );
         p_pmt->b_last_dts_probed = true;
         if( p_pmt->i_last_dts != VLC_TICK_INVALID &&
