@@ -933,6 +933,9 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
     }
 
     @synchronized(sys.displayLayer) {
+        if (sys.displayLayer.status == AVQueuedSampleBufferRenderingStatusFailed) {
+            [sys.displayLayer flushAndRemoveImage];
+        }
         [sys.displayLayer enqueueSampleBuffer:sampleBuffer];
     }
 
