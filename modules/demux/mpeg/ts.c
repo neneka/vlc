@@ -1035,25 +1035,38 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
                  ( p_pmt->pcr.i_first != VLC_TICK_INVALID || p_pmt->pcr.i_first_dts != VLC_TICK_INVALID ) &&
                  p_pmt->i_last_dts != VLC_TICK_INVALID )
         {
-            /* 非高速シーク時（ストリーム等）のフォールバックを、
-             * 現在の絶対バイト位置を基準にした相対移動で行う。 */
-            vlc_tick_t i_start = (p_pmt->pcr.i_first != VLC_TICK_INVALID) ? p_pmt->pcr.i_first :
-                                  p_pmt->pcr.i_first_dts;
+            vlc_tick_t i_first = p_pmt->pcr.i_first;
             vlc_tick_t i_last = p_pmt->i_last_dts + p_pmt->pcr.i_pcroffset;
-            vlc_tick_t i_duration = i_last - i_start;
+            vlc_tick_t i_target = i_first + i_time;
+            vlc_tick_t i_current = p_pmt->pcr.i_current;
 
             uint64_t u64;
-            if( i_duration > 0 && vlc_stream_GetSize( p_sys->stream, &u64 ) == VLC_SUCCESS )
+            if( i_last > i_first && vlc_stream_GetSize( p_sys->stream, &u64 ) == VLC_SUCCESS )
             {
-                double f_current_pos = (double)vlc_stream_Tell( p_sys->stream ) / (double)u64;
-                vlc_tick_t i_current_time = p_pmt->pcr.i_current - p_pmt->pcr.i_first;
-                double f_diff = (double)(i_time - i_current_time) / (double)i_duration;
-                double f_target = f_current_pos + f_diff;
+                // Prevent seeking out of range
+                if ( i_target < i_first) i_target = i_first;
+                else if ( i_target > i_last ) i_target = i_last;
+
+                double f_cur = (double)vlc_stream_Tell( p_sys->stream );
+                double f_target = f_cur;
+
+                if( i_target >= i_current && i_last > i_current )
+                {
+                    // forward now->end local rate
+                    double f_rate = ( (double)u64 - f_cur ) / ( (double)( i_last - i_current ) );
+                    f_target = f_cur + (double)( i_target - i_current ) * f_rate;
+                }
+                else if( i_target < i_current && i_current > i_first )
+                {
+                    // backward start->now local rate
+                    double f_rate = f_cur / (double)( i_current - i_first );
+                    f_target = f_cur + (double)( i_target - i_current ) * f_rate;
+                }
 
                 if( f_target < 0.0 ) f_target = 0.0;
-                else if( f_target > 1.0 ) f_target = 1.0;
+                else if( f_target > (double)u64 ) f_target = (double)u64;
 
-                if( vlc_stream_Seek( p_sys->stream, (uint64_t)(u64 * f_target) ) == VLC_SUCCESS )
+                if( vlc_stream_Seek( p_sys->stream, (uint64_t)f_target ) == VLC_SUCCESS )
                 {
                     ReadyQueuesPostSeek( p_demux );
                     return VLC_SUCCESS;
