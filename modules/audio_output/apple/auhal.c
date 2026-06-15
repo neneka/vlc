@@ -399,6 +399,105 @@ ReportDevice(audio_output_t *p_aout, UInt32 i_id, const char *name)
 }
 
 /*
+ * AudioDeviceTransportType: Returns the device's transport type, or 0 on
+ * failure. Lets the caller distinguish Bluetooth / AirPlay sinks from
+ * built-in speakers and HDMI/USB outputs.
+ */
+static UInt32
+AudioDeviceTransportType(AudioDeviceID i_dev_id)
+{
+    const AudioObjectPropertyAddress property = {
+        kAudioDevicePropertyTransportType,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+
+    UInt32 transportType = 0;
+    UInt32 size = sizeof(transportType);
+    if (AudioObjectGetPropertyData(i_dev_id, &property, 0, NULL, &size,
+                                   &transportType) != noErr)
+        return 0;
+    return transportType;
+}
+
+/*
+ * AudioDeviceCopyName: Returns a heap-allocated copy of the device's
+ * friendly name, or NULL on failure. The caller must free the result.
+ */
+static char *
+AudioDeviceCopyName(AudioDeviceID i_dev_id)
+{
+    const AudioObjectPropertyAddress property = {
+        kAudioObjectPropertyName,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+
+    CFStringRef name = NULL;
+    UInt32 size = sizeof(name);
+    if (AudioObjectGetPropertyData(i_dev_id, &property, 0, NULL, &size,
+                                   &name) != noErr
+        || name == NULL)
+        return NULL;
+
+    char *result = FromCFString(name, kCFStringEncodingUTF8);
+    CFRelease(name);
+    return result;
+}
+
+/*
+ * ci_contains: ASCII case-insensitive substring search. Used instead of
+ * strcasestr to avoid pulling in <strings.h> on macOS.
+ */
+static bool
+ci_contains(const char *haystack, const char *needle)
+{
+    if (haystack == NULL || needle == NULL)
+        return false;
+    size_t needle_len = strlen(needle);
+    size_t haystack_len = strlen(haystack);
+    if (needle_len == 0 || needle_len > haystack_len)
+        return false;
+    for (size_t i = 0; i + needle_len <= haystack_len; i++)
+    {
+        bool match = true;
+        for (size_t j = 0; j < needle_len; j++)
+        {
+            char h = haystack[i + j];
+            char n = needle[j];
+            if (h >= 'A' && h <= 'Z') h = (char)(h + 32);
+            if (n >= 'A' && n <= 'Z') n = (char)(n + 32);
+            if (h != n) { match = false; break; }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+/*
+ * AudioDeviceNameLooksLikeAppleHeadphones: True if the device's friendly
+ * name suggests an Apple headphone product. Used to disambiguate Bluetooth
+ * and AirPlay transports, which are shared by both headphones and
+ * standalone speakers / multi-channel receivers (JBL, UE, Sonos, HomePod,
+ * Apple TV, etc.). Apple's AirPods and Beats product lines are
+ * unambiguously headphones; everything else falls through and is treated
+ * as a non-headphone, leaving the consumer to set audioMixMode manually.
+ */
+static bool
+AudioDeviceNameLooksLikeAppleHeadphones(const char *device_name)
+{
+    return ci_contains(device_name, "airpods")
+        || ci_contains(device_name, "beats")
+        || ci_contains(device_name, "headphone")
+        || ci_contains(device_name, "headset")
+        || ci_contains(device_name, "earphone")
+        || ci_contains(device_name, "buds")
+        || ci_contains(device_name, "quietcomfort")
+        || ci_contains(device_name, "wh-")
+        || ci_contains(device_name, "wf-");
+}
+
+/*
  * AudioDeviceIsAHeadphone: Checks if device is a headphone
  */
 
@@ -429,10 +528,30 @@ AudioDeviceIsAHeadphone(audio_output_t *p_aout, AudioDeviceID i_dev_id)
      'hdpn' == headphone (kIOAudioOutputPortSubTypeHeadphones)
      'ispk' == internal speaker (kIOAudioOutputPortSubTypeInternalSpeaker)
      '61pd' == HDMI
-     '    ' == Bluetooth accessory or AirPlay
+     '    ' == Bluetooth accessory or AirPlay (transport type check below
+               is the reliable way to detect these)
     */
 
-    return data == kIOAudioOutputPortSubTypeHeadphones;
+    if (data == kIOAudioOutputPortSubTypeHeadphones)
+        return true;
+
+    UInt32 transportType = AudioDeviceTransportType(i_dev_id);
+    if (transportType == kAudioDeviceTransportTypeBluetooth
+     || transportType == kAudioDeviceTransportTypeAirPlay)
+    {
+        /* Bluetooth and AirPlay transports are shared by headphones and
+         * standalone speakers / multi-channel receivers. Disambiguate by
+         * the device name: Apple's AirPods and Beats are headphones;
+         * everything else is left to be classified as a non-headphone and
+         * the consumer can manually set audioMixMode = .binaural. */
+        char *name = AudioDeviceCopyName(i_dev_id);
+        if (name == NULL)
+            return false;
+        bool is_headphone = AudioDeviceNameLooksLikeAppleHeadphones(name);
+        free(name);
+        return is_headphone;
+    }
+    return false;
 }
 
 /*
@@ -616,6 +735,34 @@ DeviceAliveListener(AudioObjectID inObjectID,  UInt32 inNumberAddresses,
 }
 
 /*
+ * Callback when the data source of the selected audio device changes
+ * (e.g. the user plugs in or unplugs a 3.5 mm headphone jack, which
+ * switches the source FourCC between 'ispk' and 'hdpn' on Macs that
+ * combine the internal speaker and the headphone jack into a single
+ * AudioDeviceID). Trigger a full aout restart so that
+ * AudioDeviceIsAHeadphone re-reads the source and the auto-binaural
+ * mix-mode in output.c is re-evaluated.
+ */
+static OSStatus
+DataSourceChangedListener(AudioObjectID inObjectID, UInt32 inNumberAddresses,
+                          const AudioObjectPropertyAddress inAddresses[],
+                          void *inClientData)
+{
+    VLC_UNUSED(inObjectID);
+    VLC_UNUSED(inNumberAddresses);
+    VLC_UNUSED(inAddresses);
+
+    audio_output_t *p_aout = (audio_output_t *)inClientData;
+    if (!p_aout)
+        return -1;
+
+    msg_Dbg(p_aout, "audio device data source changed (e.g. headphones "
+            "plugged in), restarting aout");
+    aout_RestartRequest(p_aout, true);
+    return noErr;
+}
+
+/*
  * Callback when default audio device changed
  */
 static OSStatus
@@ -632,7 +779,6 @@ DefaultDeviceChangedListener(AudioObjectID inObjectID, UInt32 inNumberAddresses,
         return -1;
 
     aout_sys_t *p_sys = p_aout->sys;
-
     if (!p_sys->b_selected_dev_is_default)
         return noErr;
 
@@ -1052,6 +1198,16 @@ StartAnalog(audio_output_t *p_aout, audio_sample_format_t *fmt,
 
     p_aout->current_sink_info.headphones = AudioDeviceIsAHeadphone(p_aout, p_sys->i_selected_dev);
 
+    /* Watch the data source for the selected device. On Macs that combine
+     * the internal speaker and the 3.5 mm headphone jack into a single
+     * AudioDeviceID, plugging in or unplugging headphones changes the
+     * kAudioDevicePropertyDataSource FourCC between 'ispk' and 'hdpn'.
+     * The aout needs to restart so that AudioDeviceIsAHeadphone re-evaluates
+     * the source and the auto-binaural mix-mode in output.c is re-applied. */
+    AO_UPDATELISTENER(p_sys->i_selected_dev, true, DataSourceChangedListener,
+                      p_aout, kAudioDevicePropertyDataSource,
+                      kAudioObjectPropertyScopeOutput);
+
     /* Set the device we will use for this output unit */
     err = AudioUnitSetProperty(p_sys->au_unit,
                                kAudioOutputUnitProperty_CurrentDevice,
@@ -1396,6 +1552,13 @@ Stop(audio_output_t *p_aout)
     OSStatus            err = noErr;
 
     msg_Dbg(p_aout, "Stopping the auhal module");
+
+    /* Unregister the data source listener registered in StartAnalog.
+     * Removing a non-registered listener is harmless; doing this first
+     * keeps the rest of the shutdown symmetric with the registration. */
+    AO_UPDATELISTENER(p_sys->i_selected_dev, false, DataSourceChangedListener,
+                      p_aout, kAudioDevicePropertyDataSource,
+                      kAudioObjectPropertyScopeOutput);
 
     if (p_sys->au_unit)
     {
