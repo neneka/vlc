@@ -101,6 +101,33 @@ avas_PrepareFormat(audio_output_t *p_aout, AVAudioSession *instance,
 #endif
 }
 
+/*
+ * avas_PortNameLooksLikeAppleHeadphones: Coarse check for Apple's own
+ * headphone / headset product lines based on the friendly port name. Used
+ * to disambiguate transports that are shared by both headphones and speakers
+ * (Bluetooth A2DP, AirPlay, Bluetooth LE Audio). Apple's AirPods and Beats
+ * products are unambiguously headphones; speakers from other vendors such
+ * as JBL, UE, Sonos, Bose SoundLink, or HomePod do not match and fall
+ * through to PORT_TYPE_DEFAULT, which keeps them out of the auto-binaural
+ * path.
+ */
+static BOOL
+avas_PortNameLooksLikeAppleHeadphones(NSString *portName)
+{
+    if (portName.length == 0)
+        return NO;
+    NSString *name = [portName lowercaseString];
+    return [name containsString:@"airpods"]
+        || [name containsString:@"beats"]
+        || [name containsString:@"headphone"]
+        || [name containsString:@"headset"]
+        || [name containsString:@"earphone"]
+        || [name containsString:@"buds"]
+        || [name containsString:@"quietcomfort"]
+        || [name containsString:@"wh-"]
+        || [name containsString:@"wf-"];
+}
+
 int
 avas_GetPortType(audio_output_t *p_aout, AVAudioSession *instance,
                  enum port_type *pport_type)
@@ -114,15 +141,32 @@ avas_GetPortType(audio_output_t *p_aout, AVAudioSession *instance,
         /* Choose the layout with the biggest number of channels or the HDMI
          * one */
 
-        enum port_type port_type;
+        enum port_type port_type = PORT_TYPE_DEFAULT;
         if ([out.portType isEqualToString: AVAudioSessionPortUSBAudio])
             port_type = PORT_TYPE_USB;
         else if ([out.portType isEqualToString: AVAudioSessionPortHDMI])
             port_type = PORT_TYPE_HDMI;
         else if ([out.portType isEqualToString: AVAudioSessionPortHeadphones])
             port_type = PORT_TYPE_HEADPHONES;
-        else
-            port_type = PORT_TYPE_DEFAULT;
+        else if ([out.portType isEqualToString: AVAudioSessionPortBluetoothHFP])
+        {
+            /* HFP is the Bluetooth Hands-Free Profile. It is used by headsets
+             * (with a microphone) and is not used by Bluetooth speakers, so
+             * the port type alone is unambiguous. */
+            port_type = PORT_TYPE_HEADPHONES;
+        }
+        else if ([out.portType isEqualToString: AVAudioSessionPortBluetoothA2DP]
+              || [out.portType isEqualToString: AVAudioSessionPortAirPlay]
+              || (@available(iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+                  && [out.portType isEqualToString: AVAudioSessionPortBluetoothLE]))
+        {
+            /* A2DP, AirPlay, and LE Audio are used by both Bluetooth
+             * headphones and standalone speakers / multi-channel receivers.
+             * Look at the port name and only treat the route as headphones
+             * when it looks like an Apple headphone product. */
+            if (avas_PortNameLooksLikeAppleHeadphones(out.portName))
+                port_type = PORT_TYPE_HEADPHONES;
+        }
 
         *pport_type = port_type;
         if (port_type == PORT_TYPE_HDMI) /* Prefer HDMI */
