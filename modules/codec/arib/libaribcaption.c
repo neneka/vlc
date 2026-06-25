@@ -490,11 +490,37 @@ static int Open(vlc_object_t *p_this)
 
     char *psz_cfg_font_name = var_InheritString(p_this, ARIBCAPTION_CFG_PREFIX "font");
     if (psz_cfg_font_name) {
-        const char* font_families[] = { psz_cfg_font_name };
-        aribcc_renderer_set_default_font_family(p_renderer,
-                                                font_families,
-                                                ARRAY_SIZE(font_families),
-                                                true);
+        /* --aribcaption-font accepts a comma-separated list of font family
+         * names. They are tried in order as fallback. Whitespace around
+         * commas is trimmed; empty entries are skipped. */
+        const char *font_families[16];
+        size_t family_count = 0;
+        char *p = psz_cfg_font_name;
+        char *tok = p;
+        while (family_count < ARRAY_SIZE(font_families)) {
+            if (*p == ',' || *p == '\0') {
+                char saved = *p;
+                *p = '\0';
+                /* trim leading whitespace */
+                char *s = tok;
+                while (*s == ' ' || *s == '\t') s++;
+                /* trim trailing whitespace */
+                char *e = p - 1;
+                while (e >= s && (*e == ' ' || *e == '\t')) *e-- = '\0';
+                if (*s != '\0')
+                    font_families[family_count++] = s;
+                if (saved == '\0')
+                    break;
+                tok = p + 1;
+            }
+            p++;
+        }
+        if (family_count > 0) {
+            aribcc_renderer_set_default_font_family(p_renderer,
+                                                    font_families,
+                                                    family_count,
+                                                    true);
+        }
         free(psz_cfg_font_name);
     }
 
@@ -526,7 +552,7 @@ static void Close(vlc_object_t *p_this)
 #define CFG_LONGTEXT_RENDERING_BACKEND N_("Select text rendering backend")
 
 #define CFG_TEXT_FONT N_("Font")
-#define CFG_LONGTEXT_FONT N_("Select font")
+#define CFG_LONGTEXT_FONT N_("Select font (comma-separated for fallback, e.g. \"Hiragino Maru Gothic ProN, Apple Symbols\")")
 
 #define CFG_TEXT_REPLACE_DRCS N_("Replace known DRCS")
 #define CFG_LONGTEXT_REPLACE_DRCS N_("Replace known DRCS in the caption")
@@ -580,7 +606,7 @@ static const char* const ppsz_rendering_backend_descriptions[] = {
 };
 
 #ifdef __APPLE__
-# define DEFAULT_FAMILY "Hiragino Maru Gothic ProN"
+# define DEFAULT_FAMILY "Hiragino Maru Gothic ProN,Apple Symbols"
 #elif defined(_WIN32)
 # define DEFAULT_FAMILY "MS Gothic"
 #else
