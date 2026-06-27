@@ -677,7 +677,6 @@ shouldInheritContentsScale:(CGFloat)newScale
     + (instancetype)new NS_UNAVAILABLE;
     - (instancetype)initWithVoutDisplay:(vout_display_t *)vd;
     - (void)handlePictureInPictureStateChange:(BOOL)isStarted;
-    - (void)handleDisplayConfigurationChange;
 @end
 
 @implementation VLCSampleBufferDisplay
@@ -803,16 +802,6 @@ shouldInheritContentsScale:(CGFloat)newScale
         [self.spuView drawSubpicture:nil];
         self.spuView.hidden = isStarted;
     });
-}
-
-- (void)handleDisplayConfigurationChange
-{
-    /* Size and placement changes wake the renderer while future-dated samples
-     * may still be queued. Drop queued samples but keep the displayed image,
-     * so the forced redraw can enqueue a new sample without a black reset. */
-    @synchronized(_displayLayer) {
-        [_displayLayer flush];
-    }
 }
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification
@@ -1120,12 +1109,10 @@ static void Display(vout_display_t *vd, picture_t *pic)
 
 static int SetDisplaySize(vout_display_t *vd, unsigned width, unsigned height)
 {
+    VLC_UNUSED(vd);
     VLC_UNUSED(width);
     VLC_UNUSED(height);
 
-    VLCSampleBufferDisplay *sys;
-    sys = (__bridge VLCSampleBufferDisplay*)vd->sys;
-    [sys handleDisplayConfigurationChange];
     return VLC_SUCCESS;
 }
 
@@ -1135,17 +1122,14 @@ static int VideoPlaceChanged(vout_display_t *vd, const vout_display_place_t *pla
     sys = (__bridge VLCSampleBufferDisplay*)vd->sys;
     if (place != NULL)
         sys->place = *place;
-    [sys handleDisplayConfigurationChange];
     return VLC_SUCCESS;
 }
 
 static int SourceChanged(vout_display_t *vd, const video_format_t *source)
 {
+    VLC_UNUSED(vd);
     VLC_UNUSED(source);
 
-    VLCSampleBufferDisplay *sys;
-    sys = (__bridge VLCSampleBufferDisplay*)vd->sys;
-    [sys handleDisplayConfigurationChange];
     return VLC_SUCCESS;
 }
 
