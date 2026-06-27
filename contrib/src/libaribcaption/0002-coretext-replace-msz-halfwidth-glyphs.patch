@@ -1,0 +1,235 @@
+From 5170a3d393faae3f913cfa812ea88cc10ea3e84a Mon Sep 17 00:00:00 2001
+From: ci7lus <7887955+ci7lus@users.noreply.github.com>
+Date: Sun, 28 Jun 2026 05:32:27 +0900
+Subject: [PATCH] coretext: replace MSZ glyphs with halfwidth variants
+
+---
+ include/aribcaption/renderer.h          |   4 +-
+ src/renderer/text_renderer_coretext.cpp | 133 +++++++++++++++++++++++-
+ src/renderer/text_renderer_coretext.hpp |   4 +
+ 3 files changed, 137 insertions(+), 4 deletions(-)
+
+diff --git a/include/aribcaption/renderer.h b/include/aribcaption/renderer.h
+index 488a766..cf6d099 100644
+--- a/include/aribcaption/renderer.h
++++ b/include/aribcaption/renderer.h
+@@ -316,8 +316,8 @@ ARIBCC_API bool aribcc_renderer_set_language_specific_font_family(aribcc_rendere
+  * The font should be Adobe-Japan1 compliant.
+  * If the font has Std, Pr5, Pr6, or Pro in the name, it is likely to be compliant.
+  * Fonts such as IBM Plex Sans JP, Morisawa BIZ UDGothic, Morisawa BIZ UDMincho,
+- * Yu Gothic, Yu Mincho, and Meiryo are also supported.
+- * It is only effective when using the FreeType or DirectWrite renderer,
++ * Yu Gothic, Yu Mincho, Meiryo, and Hiragino are also supported.
++ * It is only effective when using the FreeType, DirectWrite or CoreText renderer,
+  * and is enabled by default for these renderers.
+  *
+  * @param decoder @aribcc_decoder_t
+diff --git a/src/renderer/text_renderer_coretext.cpp b/src/renderer/text_renderer_coretext.cpp
+index 8524849..71f06b8 100644
+--- a/src/renderer/text_renderer_coretext.cpp
++++ b/src/renderer/text_renderer_coretext.cpp
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include <CoreFoundation/CoreFoundation.h>
++#include <algorithm>
+ #include <cmath>
+ #include <utility>
+ #include "base/cfstr_helper.hpp"
+@@ -28,6 +29,56 @@
+ 
+ namespace aribcaption {
+ 
++namespace {
++
++bool GetFirstShapedGlyph(CTFontRef ctfont, const std::u16string& utf16, size_t codeunit_count,
++                         CGGlyph* out_glyph, CGSize* out_advance) {
++    ScopedCFRef<CFStringRef> string(CFStringCreateWithCharacters(kCFAllocatorDefault,
++                                                                 reinterpret_cast<const UniChar*>(utf16.data()),
++                                                                 static_cast<CFIndex>(codeunit_count)));
++    if (!string) {
++        return false;
++    }
++
++    ScopedCFRef<CFMutableAttributedStringRef> attr_string(
++        CFAttributedStringCreateMutable(kCFAllocatorDefault, 0));
++    if (!attr_string) {
++        return false;
++    }
++
++    CFAttributedStringReplaceString(attr_string.get(), CFRangeMake(0, 0), string.get());
++    CFAttributedStringSetAttribute(attr_string.get(),
++                                   CFRangeMake(0, CFStringGetLength(string.get())),
++                                   kCTFontAttributeName,
++                                   ctfont);
++
++    ScopedCFRef<CTLineRef> line(CTLineCreateWithAttributedString(attr_string.get()));
++    if (!line) {
++        return false;
++    }
++
++    CFArrayRef runs = CTLineGetGlyphRuns(line.get());
++    if (!runs || CFArrayGetCount(runs) != 1) {
++        return false;
++    }
++
++    CTRunRef run = static_cast<CTRunRef>(const_cast<void*>(CFArrayGetValueAtIndex(runs, 0)));
++    if (!run || CTRunGetGlyphCount(run) != 1) {
++        return false;
++    }
++
++    CTRunGetGlyphs(run, CFRangeMake(0, 1), out_glyph);
++    CTRunGetAdvances(run, CFRangeMake(0, 1), out_advance);
++    return *out_glyph != 0 && out_advance->width > 0.0;
++}
++
++bool HalfWidthAdvanceFits(CGFloat advance, int char_width, int char_height) {
++    const CGFloat tolerance = std::max<CGFloat>(1.0f, static_cast<CGFloat>(char_height) * 0.05f);
++    return advance <= static_cast<CGFloat>(char_width) + tolerance;
++}
++
++}  // namespace
++
+ TextRendererCoreText::TextRendererCoreText(Context& context, FontProvider& font_provider)
+     : log_(GetContextLogger(context)), font_provider_(font_provider) {}
+ 
+@@ -62,6 +113,10 @@ bool TextRendererCoreText::SetFontFamily(const std::vector<std::string>& font_fa
+     return true;
+ }
+ 
++void TextRendererCoreText::SetReplaceMSZHalfWidthGlyph(bool replace) {
++    replace_msz_halfwidth_glyph_ = replace;
++}
++
+ struct TextRenderContextPrivateCoreText : public TextRenderContext::ContextPrivate {
+ public:
+     TextRenderContextPrivateCoreText() = default;
+@@ -198,6 +253,27 @@ auto TextRendererCoreText::DrawChar(TextRenderContext& render_ctx, int target_x,
+                                  glyphs,
+                                  static_cast<CFIndex>(codeunit_count));
+ 
++    // Check if it is MSZ (Middle Size)
++    bool is_requesting_halfwidth = floating::AlmostEquals(aspect_ratio, 0.5f, 0.05f);
++    ScopedCFRef<CTFontRef> halfwidth_ctfont_sized;
++    if (replace_msz_halfwidth_glyph_ && is_requesting_halfwidth) {
++        halfwidth_ctfont_sized = CreateHalfWidthCTFont(ctfont);
++        if (halfwidth_ctfont_sized) {
++            CGGlyph halfwidth_glyph = 0;
++            CGSize halfwidth_advance = CGSizeZero;
++            if (GetFirstShapedGlyph(halfwidth_ctfont_sized.get(),
++                                    utf16,
++                                    codeunit_count,
++                                    &halfwidth_glyph,
++                                    &halfwidth_advance) &&
++                HalfWidthAdvanceFits(halfwidth_advance.width, char_width, char_height)) {
++                glyphs[0] = halfwidth_glyph;
++                ctfont = halfwidth_ctfont_sized.get();
++                char_width = char_height;
++            }
++        }
++    }
++
+     CGFloat ascent = CTFontGetAscent(ctfont);
+     CGFloat descent = CTFontGetDescent(ctfont);
+     CGFloat em_height = ascent + descent;
+@@ -228,8 +304,6 @@ auto TextRendererCoreText::DrawChar(TextRenderContext& render_ctx, int target_x,
+ 
+     CGPoint origin = CGPointMake(target_x, baseline_y);
+ 
+-    // Check if it is MSZ (Middle Size)
+-    bool is_requesting_halfwidth = floating::AlmostEquals(aspect_ratio, 0.5f, 0.05f);
+     bool needless_horizontal_scaling = is_requesting_halfwidth && unicode::IsHalfwidthCharacter(ucs4);
+ 
+     // Scale character correctly if char_width is different from char_height
+@@ -334,4 +408,59 @@ auto TextRendererCoreText::CreateSizedCTFont(CTFontRef ctfont, int char_height)
+     return sized_ctfont;
+ }
+ 
++auto TextRendererCoreText::CreateHalfWidthCTFont(CTFontRef ctfont) -> ScopedCFRef<CTFontRef> {
++    int feature_value = 1;
++    ScopedCFRef<CFNumberRef> cf_feature_value(CFNumberCreate(nullptr, kCFNumberIntType, &feature_value));
++    if (!cf_feature_value) {
++        return nullptr;
++    }
++
++    const void* feature_keys[] = {
++        kCTFontOpenTypeFeatureTag,
++        kCTFontOpenTypeFeatureValue,
++    };
++    const void* feature_values[] = {
++        CFSTR("hwid"),
++        cf_feature_value.get(),
++    };
++    ScopedCFRef<CFDictionaryRef> feature(CFDictionaryCreate(kCFAllocatorDefault,
++                                                            feature_keys,
++                                                            feature_values,
++                                                            2,
++                                                            &kCFTypeDictionaryKeyCallBacks,
++                                                            &kCFTypeDictionaryValueCallBacks));
++    if (!feature) {
++        return nullptr;
++    }
++
++    const void* features[] = { feature.get() };
++    ScopedCFRef<CFArrayRef> feature_settings(CFArrayCreate(kCFAllocatorDefault,
++                                                           features,
++                                                           1,
++                                                           &kCFTypeArrayCallBacks));
++    if (!feature_settings) {
++        return nullptr;
++    }
++
++    const void* descriptor_keys[] = { kCTFontFeatureSettingsAttribute };
++    const void* descriptor_values[] = { feature_settings.get() };
++    ScopedCFRef<CFDictionaryRef> descriptor_attributes(CFDictionaryCreate(kCFAllocatorDefault,
++                                                                         descriptor_keys,
++                                                                         descriptor_values,
++                                                                         1,
++                                                                         &kCFTypeDictionaryKeyCallBacks,
++                                                                         &kCFTypeDictionaryValueCallBacks));
++    if (!descriptor_attributes) {
++        return nullptr;
++    }
++
++    ScopedCFRef<CTFontDescriptorRef> descriptor(CTFontDescriptorCreateWithAttributes(descriptor_attributes.get()));
++    if (!descriptor) {
++        return nullptr;
++    }
++
++    ScopedCFRef<CTFontRef> halfwidth_ctfont(CTFontCreateCopyWithAttributes(ctfont, 0.0f, nullptr, descriptor.get()));
++    return halfwidth_ctfont;
++}
++
+ }  // namespace aribcaption
+diff --git a/src/renderer/text_renderer_coretext.hpp b/src/renderer/text_renderer_coretext.hpp
+index fb7eb86..22fe310 100644
+--- a/src/renderer/text_renderer_coretext.hpp
++++ b/src/renderer/text_renderer_coretext.hpp
+@@ -47,6 +47,7 @@ public:
+     bool Initialize() override;
+     void SetLanguage(uint32_t iso6392_language_code) override;
+     bool SetFontFamily(const std::vector<std::string>& font_family) override;
++    void SetReplaceMSZHalfWidthGlyph(bool replace) override;
+     auto BeginDraw(Bitmap& target_bmp) -> TextRenderContext override;
+     void EndDraw(TextRenderContext& context) override;
+     auto DrawChar(TextRenderContext& render_ctx, int x, int y,
+@@ -62,6 +63,7 @@ private:
+     static auto RGBAToCGColor(ColorRGBA rgba) -> ScopedCFRef<CGColorRef>;
+     static auto CreateBitmapTargetCGContext(Bitmap& bitmap) -> ScopedCFRef<CGContextRef>;
+     static auto CreateSizedCTFont(CTFontRef ctfont, int char_height) -> ScopedCFRef<CTFontRef>;
++    static auto CreateHalfWidthCTFont(CTFontRef ctfont) -> ScopedCFRef<CTFontRef>;
+ private:
+     std::shared_ptr<Logger> log_;
+ 
+@@ -78,6 +80,8 @@ private:
+ 
+     ScopedCFRef<CTFontRef> main_ctfont_sized_;
+     ScopedCFRef<CTFontRef> fallback_ctfont_sized_;
++
++    bool replace_msz_halfwidth_glyph_ = true;
+ };
+ 
+ }  // namespace aribcaption
+-- 
+2.39.1
+
