@@ -871,7 +871,10 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
     }
 
     CVPixelBufferRef pixelBuffer = cvpxpic_get_ref(dst);
-    CVPixelBufferRetain(pixelBuffer);
+    if (pixelBuffer != NULL) {
+        CVPixelBufferRetain(pixelBuffer);
+        cvpx_attach_mapped_color_properties(pixelBuffer, &dst->format);
+    }
     picture_Release(dst);
 
     if (pixelBuffer == NULL) {
