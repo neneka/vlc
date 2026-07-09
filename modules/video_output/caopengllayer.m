@@ -47,6 +47,12 @@
 #include "opengl/renderer.h"
 #include "opengl/vout_helper.h"
 
+#if defined(MAC_OS_X_VERSION_MAX_ALLOWED) && MAC_OS_X_VERSION_MAX_ALLOWED >= 101100
+#define VLC_HAVE_CAOPENGL_EDR 1
+#else
+#define VLC_HAVE_CAOPENGL_EDR 0
+#endif
+
 /**
  * Protocol declaration that drawable-nsobject should follow
  */
@@ -771,6 +777,11 @@ shouldInheritContentsScale:(CGFloat)newScale
         self.needsDisplayOnBoundsChange = YES;
         self.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
         self.asynchronous = NO;
+#if VLC_HAVE_CAOPENGL_EDR
+        if (@available(macOS 10.11, *)) {
+            self.wantsExtendedDynamicRangeContent = YES;
+        }
+#endif
         self.opaque = 1.0;
         self.hidden = NO;
         [CATransaction unlock];

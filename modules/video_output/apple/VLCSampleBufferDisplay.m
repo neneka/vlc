@@ -53,6 +53,12 @@
 #define IS_VT_ROTATION_API_AVAILABLE __VISION_OS_VERSION_MAX_ALLOWED >= 10000
 #endif
 
+#if TARGET_OS_OSX && defined(MAC_OS_X_VERSION_MAX_ALLOWED) && defined(__MAC_14_0) && MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_14_0
+#define VLC_HAVE_CALAYER_EDR 1
+#else
+#define VLC_HAVE_CALAYER_EDR 0
+#endif
+
 typedef NS_ENUM(NSUInteger, VLCSampleBufferPixelRotation) {
     kVLCSampleBufferPixelRotation_0 = 0,
     kVLCSampleBufferPixelRotation_90CW,
@@ -610,6 +616,14 @@ static const vlc_fourcc_t sample_buffer_display_subfmts[] = {
     [CATransaction lock];
     layer.needsDisplayOnBoundsChange = YES;
     layer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+#if VLC_HAVE_CALAYER_EDR
+    if (@available(macOS 14.0, *)) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        layer.wantsExtendedDynamicRangeContent = YES;
+#pragma clang diagnostic pop
+    }
+#endif
     layer.opaque = 1.0;
     layer.hidden = NO;
     [CATransaction unlock];
