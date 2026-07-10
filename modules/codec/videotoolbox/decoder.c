@@ -443,29 +443,56 @@ static bool LateStartH264(decoder_t *p_dec)
     return (p_dec->fmt_in->i_extra == 0 && !hxxx_helper_has_config(&h264ctx->hh));
 }
 
+static int GetHxxxColorimetry(const struct hxxx_helper *hh,
+                              video_color_primaries_t *primaries,
+                              video_transfer_func_t *transfer,
+                              video_color_space_t *colorspace,
+                              video_color_range_t *full_range)
+{
+    return hxxx_helper_get_colorimetry(hh, primaries, transfer,
+                                       colorspace, full_range);
+}
+
+static bool HxxxColorimetryChanged(decoder_t *p_dec, const struct hxxx_helper *hh)
+{
+    video_color_primaries_t primaries;
+    video_transfer_func_t transfer;
+    video_color_space_t colorspace;
+    video_color_range_t full_range;
+    if (GetHxxxColorimetry(hh, &primaries, &transfer,
+                           &colorspace, &full_range) != VLC_SUCCESS)
+        return false;
+
+    const video_format_t *video = &p_dec->fmt_out.video;
+    return video->primaries != primaries ||
+           video->transfer != transfer ||
+           video->space != colorspace ||
+           video->color_range != full_range;
+}
+
+static void UpdateHxxxColorimetry(decoder_t *p_dec, const struct hxxx_helper *hh)
+{
+    video_color_primaries_t primaries;
+    video_transfer_func_t transfer;
+    video_color_space_t colorspace;
+    video_color_range_t full_range;
+    if (GetHxxxColorimetry(hh, &primaries, &transfer,
+                           &colorspace, &full_range) != VLC_SUCCESS)
+        return;
+
+    video_format_t *video = &p_dec->fmt_out.video;
+    video->primaries = primaries;
+    video->transfer = transfer;
+    video->space = colorspace;
+    video->color_range = full_range;
+}
+
 static bool ConfigureVoutH264(decoder_t *p_dec)
 {
     decoder_sys_t *p_sys = p_dec->p_sys;
     struct vt_h264_context *h264ctx = p_sys->p_codec_context;
 
-    if (p_dec->fmt_in->video.primaries == COLOR_PRIMARIES_UNDEF)
-    {
-        video_color_primaries_t primaries;
-        video_transfer_func_t transfer;
-        video_color_space_t colorspace;
-        video_color_range_t full_range;
-        if (hxxx_helper_get_colorimetry(&h264ctx->hh,
-                                        &primaries,
-                                        &transfer,
-                                        &colorspace,
-                                        &full_range) == VLC_SUCCESS)
-        {
-            p_dec->fmt_out.video.primaries = primaries;
-            p_dec->fmt_out.video.transfer = transfer;
-            p_dec->fmt_out.video.space = colorspace;
-            p_dec->fmt_out.video.color_range = full_range;
-        }
-    }
+    UpdateHxxxColorimetry(p_dec, &h264ctx->hh);
 
     if (!p_dec->fmt_in->video.i_visible_width || !p_dec->fmt_in->video.i_visible_height)
     {
@@ -514,6 +541,9 @@ static bool VideoToolboxNeedsToRestartH264(decoder_t *p_dec,
         return true;
 
     if (hxxx_helper_get_current_sar(hh, &sarn, &sard) != VLC_SUCCESS)
+        return true;
+
+    if (HxxxColorimetryChanged(p_dec, hh))
         return true;
 
     bool b_ret = true;
