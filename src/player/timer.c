@@ -41,6 +41,7 @@ vlc_player_ResetTimer(vlc_player_t *player)
     player->timer.seek_ts = VLC_TICK_INVALID;
     player->timer.seek_position = -1;
     player->timer.trust_demux_pos = -1;
+    player->timer.position_anchor_initialized = false;
     player->timer.update_state = UPDATE_STATE_RESUMED;
     player->timer.pause_date = VLC_TICK_INVALID;
     player->timer.stopping = false;
@@ -356,7 +357,7 @@ vlc_player_UpdateTimerSource(vlc_player_t *player,
 
     const bool had_valid_point =
         source->point.system_date != VLC_TICK_INVALID;
-    const vlc_tick_t previous_ts = source->point.ts;
+    const vlc_tick_t previous_system_date = source->point.system_date;
     const double previous_position = source->point.position;
 
     source->point.rate = rate;
@@ -417,8 +418,9 @@ vlc_player_UpdateTimerSource(vlc_player_t *player,
                 /* The first output-clock point after a seek is the moment the
                  * requested byte position starts being presented. */
                 source->point.position = player->timer.seek_position;
+                player->timer.position_anchor_initialized = true;
             }
-            else
+            else if (!player->timer.position_anchor_initialized)
             {
                 /* Initial playback has no requested position to anchor to.
                  * Include the timestamp of the first presented point so that
@@ -427,19 +429,25 @@ vlc_player_UpdateTimerSource(vlc_player_t *player,
                     (ts - player->timer.input_normal_time
                         - player->timer.start_offset)
                     / (double) source->point.length;
+                player->timer.position_anchor_initialized = true;
             }
+            else
+                source->point.position = previous_position;
         }
-        else if (previous_ts != VLC_TICK_INVALID)
+        else if (previous_system_date != VLC_TICK_MAX &&
+                 system_date != VLC_TICK_INVALID &&
+                 system_date != VLC_TICK_MAX &&
+                 system_date >= previous_system_date)
         {
-            /* Keep the position on the presented ES clock.  Replacing it with
-             * input_position here would snap it back to vlc_stream_Tell(),
-             * i.e. the demux read head rather than the displayed frame. */
+            /* Advance from the monotonic presentation date.  ES timestamps
+             * can jump on discontinuities and clock-source changes, while
+             * the presentation date represents media time actually played. */
             source->point.position = previous_position
-                                   + (source->point.ts - previous_ts)
+                                   + (system_date - previous_system_date) * rate
                                    / (double) source->point.length;
         }
         else
-            source->point.position = player->timer.input_position;
+            source->point.position = previous_position;
 
         if (source->point.position < 0.0)
             source->point.position = 0.0;
