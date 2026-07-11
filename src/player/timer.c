@@ -41,6 +41,7 @@ vlc_player_ResetTimer(vlc_player_t *player)
     player->timer.seek_ts = VLC_TICK_INVALID;
     player->timer.seek_position = -1;
     player->timer.trust_demux_pos = -1;
+    player->timer.position_anchor_initialized = false;
     player->timer.update_state = UPDATE_STATE_RESUMED;
     player->timer.pause_date = VLC_TICK_INVALID;
     player->timer.stopping = false;
@@ -354,6 +355,10 @@ vlc_player_UpdateTimerSource(vlc_player_t *player,
     assert(ts >= VLC_TICK_0);
     assert(player->timer.input_normal_time >= VLC_TICK_0);
 
+    const vlc_tick_t previous_system_date = source->point.system_date;
+    const double previous_position = source->point.position;
+    const double previous_rate = source->point.rate;
+
     source->point.rate = rate;
     source->point.ts = ts - player->timer.input_normal_time - player->timer.start_offset + VLC_TICK_0;
     source->point.length = player->timer.input_length;
@@ -402,6 +407,47 @@ vlc_player_UpdateTimerSource(vlc_player_t *player,
     if (!trust_demux_pos && source->point.length != VLC_TICK_INVALID && !source->point.live)
         source->point.position = (ts - player->timer.input_normal_time - player->timer.start_offset)
                                / (double) source->point.length;
+    else if (trust_demux_pos && source == &player->timer.best_source &&
+             source->point.length > 0 && !source->point.live)
+    {
+        source->point.position = previous_position;
+
+        if (previous_system_date == VLC_TICK_INVALID)
+        {
+            if (player->timer.seek_position >= 0.0)
+            {
+                /* The first output-clock point after a seek is the moment the
+                 * requested byte position starts being presented. */
+                source->point.position = player->timer.seek_position;
+            }
+            else if (!player->timer.position_anchor_initialized)
+            {
+                /* The first output clock may arrive before input_normal_time
+                 * is known, so its timestamp cannot establish a normalized
+                 * position.  Playback without a pending seek starts at zero
+                 * and advances from presentation dates from this point on. */
+                source->point.position = 0.0;
+            }
+
+            player->timer.position_anchor_initialized = true;
+        }
+        else if (system_date != VLC_TICK_INVALID &&
+                 system_date != VLC_TICK_MAX &&
+                 system_date >= previous_system_date)
+        {
+            /* Advance from the monotonic presentation date.  ES timestamps
+             * can jump on discontinuities and clock-source changes, while
+             * the presentation date represents media time actually played. */
+            source->point.position +=
+                (system_date - previous_system_date) * previous_rate
+                / (double) source->point.length;
+        }
+
+        if (source->point.position < 0.0)
+            source->point.position = 0.0;
+        else if (source->point.position > 1.0)
+            source->point.position = 1.0;
+    }
     else
         source->point.position = player->timer.input_position;
 }
