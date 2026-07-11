@@ -412,13 +412,22 @@ vlc_player_UpdateTimerSource(vlc_player_t *player,
     {
         if (!had_valid_point)
         {
-            /* The first output-clock point after a seek is the moment the
-             * requested byte position starts being presented.  Use the
-             * requested position as the new anchor instead of the demux read
-             * head, which may already be ahead because of buffering. */
-            source->point.position = player->timer.seek_position >= 0.0
-                                   ? player->timer.seek_position
-                                   : player->timer.input_position;
+            if (player->timer.seek_position >= 0.0)
+            {
+                /* The first output-clock point after a seek is the moment the
+                 * requested byte position starts being presented. */
+                source->point.position = player->timer.seek_position;
+            }
+            else
+            {
+                /* Initial playback has no requested position to anchor to.
+                 * Include the timestamp of the first presented point so that
+                 * subsequent position deltas don't permanently lag behind it. */
+                source->point.position =
+                    (ts - player->timer.input_normal_time
+                        - player->timer.start_offset)
+                    / (double) source->point.length;
+            }
         }
         else if (previous_ts != VLC_TICK_INVALID)
         {
