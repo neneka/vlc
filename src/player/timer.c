@@ -354,6 +354,11 @@ vlc_player_UpdateTimerSource(vlc_player_t *player,
     assert(ts >= VLC_TICK_0);
     assert(player->timer.input_normal_time >= VLC_TICK_0);
 
+    const bool had_valid_point =
+        source->point.system_date != VLC_TICK_INVALID;
+    const vlc_tick_t previous_ts = source->point.ts;
+    const double previous_position = source->point.position;
+
     source->point.rate = rate;
     source->point.ts = ts - player->timer.input_normal_time - player->timer.start_offset + VLC_TICK_0;
     source->point.length = player->timer.input_length;
@@ -402,6 +407,36 @@ vlc_player_UpdateTimerSource(vlc_player_t *player,
     if (!trust_demux_pos && source->point.length != VLC_TICK_INVALID && !source->point.live)
         source->point.position = (ts - player->timer.input_normal_time - player->timer.start_offset)
                                / (double) source->point.length;
+    else if (trust_demux_pos && source == &player->timer.best_source &&
+             source->point.length > 0 && !source->point.live)
+    {
+        if (!had_valid_point)
+        {
+            /* The first output-clock point after a seek is the moment the
+             * requested byte position starts being presented.  Use the
+             * requested position as the new anchor instead of the demux read
+             * head, which may already be ahead because of buffering. */
+            source->point.position = player->timer.seek_position >= 0.0
+                                   ? player->timer.seek_position
+                                   : player->timer.input_position;
+        }
+        else if (previous_ts != VLC_TICK_INVALID)
+        {
+            /* Keep the position on the presented ES clock.  Replacing it with
+             * input_position here would snap it back to vlc_stream_Tell(),
+             * i.e. the demux read head rather than the displayed frame. */
+            source->point.position = previous_position
+                                   + (source->point.ts - previous_ts)
+                                   / (double) source->point.length;
+        }
+        else
+            source->point.position = player->timer.input_position;
+
+        if (source->point.position < 0.0)
+            source->point.position = 0.0;
+        else if (source->point.position > 1.0)
+            source->point.position = 1.0;
+    }
     else
         source->point.position = player->timer.input_position;
 }
