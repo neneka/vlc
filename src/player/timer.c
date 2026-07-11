@@ -422,13 +422,11 @@ vlc_player_UpdateTimerSource(vlc_player_t *player,
             }
             else if (!player->timer.position_anchor_initialized)
             {
-                /* Initial playback has no requested position to anchor to.
-                 * Include the timestamp of the first presented point so that
-                 * subsequent position deltas don't permanently lag behind it. */
-                source->point.position =
-                    (ts - player->timer.input_normal_time
-                        - player->timer.start_offset)
-                    / (double) source->point.length;
+                /* The first output clock may arrive before input_normal_time
+                 * is known, so its timestamp cannot establish a normalized
+                 * position.  Playback without a pending seek starts at zero
+                 * and advances from presentation dates from this point on. */
+                source->point.position = 0.0;
                 player->timer.position_anchor_initialized = true;
             }
             else
