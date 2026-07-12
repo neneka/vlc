@@ -158,6 +158,25 @@ vlc_player_input_SeekByTime(struct vlc_player_input *input, vlc_tick_t time,
     if (time < VLC_TICK_0)
         time = VLC_TICK_0;
 
+    /* The non-fastseek MPEG-TS time fallback uses the demux read head, which
+     * can be ahead of playback. Convert from the presented byte position and
+     * seek by position instead. Fastseek sources don't enable this path. */
+    double byte_position;
+    if (vlc_player_GetByteSeekPosition(player, time, &byte_position))
+    {
+        vlc_player_UpdateTimerSeekState(player, time, byte_position);
+
+        int ret = input_ControlPush(input->thread, INPUT_CONTROL_SET_POSITION,
+            &(input_control_param_t) {
+                .pos.f_val = byte_position,
+                .pos.b_fast_seek = speed == VLC_PLAYER_SEEK_FAST,
+        });
+
+        if (ret == VLC_SUCCESS)
+            vlc_player_osd_Position(player, input, time, byte_position);
+        return;
+    }
+
     vlc_player_UpdateTimerSeekState(player, time, -1);
 
     int ret = input_ControlPush(input->thread, INPUT_CONTROL_SET_TIME,
@@ -962,7 +981,7 @@ input_thread_Events(input_thread_t *input_thread,
         if (event->output_clock.system_ts != VLC_TICK_INVALID)
         {
             const struct vlc_player_timer_point point = {
-                .position = 0,
+                .position = event->output_clock.byte_position,
                 .rate = event->output_clock.rate,
                 .ts = event->output_clock.ts,
                 .length = VLC_TICK_INVALID,

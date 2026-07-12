@@ -59,6 +59,14 @@
 
 #include <vlc_iso_lang.h>
 
+#define BYTE_POSITION_POINTS 2048
+
+struct byte_position_point
+{
+    vlc_tick_t ts;
+    double position;
+};
+
 /*****************************************************************************
  * Local prototypes
  *****************************************************************************/
@@ -146,6 +154,11 @@ struct es_out_id_t
 
     vlc_tick_t i_pts_level;
     vlc_tick_t delay;
+
+    vlc_mutex_t byte_position_lock;
+    struct byte_position_point *byte_positions;
+    size_t byte_position_next;
+    size_t byte_position_count;
 
     /* Fields for ES created by decoders */
     struct VLC_VECTOR(es_out_id_t *) sub_es_vec;
@@ -730,6 +743,7 @@ static void EsRelease(es_out_id_t *es)
     es_format_Clean(&es->fmt);
     input_source_Release(es->id.source);
     free(es->id.str_id);
+    free(es->byte_positions);
     free(es);
 }
 
@@ -2548,6 +2562,10 @@ static es_out_id_t *EsOutAddLocked(es_out_sys_t *p_sys,
     es->mouse_being_dragged = false;
     es->i_pts_level = VLC_TICK_INVALID;
     es->delay = VLC_TICK_MAX;
+    vlc_mutex_init(&es->byte_position_lock);
+    es->byte_positions = NULL;
+    es->byte_position_next = 0;
+    es->byte_position_count = 0;
 
     vlc_list_append(&es->node, es->p_master ? &p_sys->es_slaves : &p_sys->es);
 
@@ -2590,8 +2608,28 @@ static void ClockUpdate(vlc_tick_t system_ts, vlc_tick_t ts, double rate,
     es_out_id_t *es = data;
     es_out_sys_t *p_sys = PRIV(&es->out->out);
 
+    double byte_position = -1.0;
+    vlc_mutex_lock(&es->byte_position_lock);
+    vlc_tick_t best_delta = VLC_TICK_MAX;
+    for (size_t i = 0; i < es->byte_position_count; ++i)
+    {
+        const size_t index = (es->byte_position_next + BYTE_POSITION_POINTS
+                            - i - 1) % BYTE_POSITION_POINTS;
+        const struct byte_position_point *point = &es->byte_positions[index];
+        const vlc_tick_t delta = point->ts > ts ? point->ts - ts : ts - point->ts;
+        if (delta < best_delta)
+        {
+            best_delta = delta;
+            byte_position = point->position;
+        }
+    }
+    if (best_delta > VLC_TICK_FROM_SEC(2))
+        byte_position = -1.0;
+    vlc_mutex_unlock(&es->byte_position_lock);
+
     input_SendEventOutputClock(p_sys->p_input, &es->id, es->master, system_ts,
-                               ts, rate, frame_rate, frame_rate_base);
+                               ts, byte_position, rate,
+                               frame_rate, frame_rate_base);
 }
 
 static void EsOutCreateDecoder(es_out_sys_t *p_sys, es_out_id_t *p_es)
@@ -3269,6 +3307,35 @@ static int EsOutSend(es_out_t *out, es_out_id_t *es, block_t *p_block )
             p_block->i_pts -= es->id.source->i_normal_time - VLC_TICK_0;
             p_block->i_pts += p_sys->main_source->i_normal_time - VLC_TICK_0;
         }
+    }
+
+    const vlc_tick_t byte_ts = p_block->i_pts != VLC_TICK_INVALID
+                             ? p_block->i_pts : p_block->i_dts;
+    if (p_block->i_stream_size > 0 && byte_ts != VLC_TICK_INVALID)
+    {
+        vlc_mutex_lock(&es->byte_position_lock);
+        if (p_block->i_flags & BLOCK_FLAG_DISCONTINUITY)
+        {
+            es->byte_position_next = 0;
+            es->byte_position_count = 0;
+        }
+        if (es->byte_positions == NULL)
+            es->byte_positions = vlc_alloc(BYTE_POSITION_POINTS,
+                                           sizeof(*es->byte_positions));
+        if (es->byte_positions != NULL)
+        {
+            es->byte_positions[es->byte_position_next] =
+                (struct byte_position_point) {
+                    .ts = byte_ts,
+                    .position = p_block->i_stream_offset
+                              / (double) p_block->i_stream_size,
+                };
+            es->byte_position_next =
+                (es->byte_position_next + 1) % BYTE_POSITION_POINTS;
+            if (es->byte_position_count < BYTE_POSITION_POINTS)
+                es->byte_position_count++;
+        }
+        vlc_mutex_unlock(&es->byte_position_lock);
     }
 
     /* Drop all ESes except the video one in case of next-frame */

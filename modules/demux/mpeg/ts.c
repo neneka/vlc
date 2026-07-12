@@ -532,6 +532,8 @@ static int Open( vlc_object_t *p_this )
     vlc_stream_Control( p_sys->stream, STREAM_CAN_SEEK, &p_sys->b_canseek );
     vlc_stream_Control( p_sys->stream, STREAM_CAN_FASTSEEK,
                         &p_sys->b_canfastseek );
+    if( vlc_stream_GetSize( p_sys->stream, &p_sys->i_stream_size ) != VLC_SUCCESS )
+        p_sys->i_stream_size = 0;
 
     if( !p_sys->b_access_control && var_CreateGetBool( p_demux, "ts-pmtfix-waitdata" ) )
         p_sys->es_creation = DELAY_ES;
@@ -1505,7 +1507,8 @@ static block_t * ConvertPESBlock( demux_t *p_demux, ts_es_t *p_es,
 /****************************************************************************
  * fanouts current block to all subdecoders / shared pid es
  ****************************************************************************/
-static void SendDataChain( demux_t *p_demux, ts_es_t *p_es, block_t *p_chain )
+static void SendDataChain( demux_t *p_demux, ts_es_t *p_es, block_t *p_chain,
+                           uint64_t i_byte_offset, uint64_t i_byte_size )
 {
     demux_sys_t *p_sys = p_demux->p_sys;
 
@@ -1514,6 +1517,9 @@ static void SendDataChain( demux_t *p_demux, ts_es_t *p_es, block_t *p_chain )
         block_t *p_block = p_chain;
         p_chain = p_block->p_next;
         p_block->p_next = NULL;
+
+        p_block->i_stream_offset = i_byte_offset;
+        p_block->i_stream_size = i_byte_size;
 
         /* clean up any private flag */
         p_block->i_flags &= ~BLOCK_FLAG_PRIVATE_MASK;
@@ -1585,6 +1591,8 @@ static void ParsePESDataChain( demux_t *p_demux, ts_pid_t *pid, block_t *p_pes,
     vlc_tick_t i_pts = VLC_TICK_INVALID;
     const es_mpeg4_descriptor_t *p_mpeg4desc = NULL;
     demux_sys_t *p_sys = p_demux->p_sys;
+    const uint64_t i_byte_offset = p_pes->i_stream_offset;
+    const uint64_t i_byte_size = p_pes->i_stream_size;
 
     assert(pid->type == TYPE_STREAM);
 
@@ -1785,7 +1793,8 @@ static void ParsePESDataChain( demux_t *p_demux, ts_pid_t *pid, block_t *p_pes,
                     p_block = ConvertPESBlock( p_demux, p_es, i_pes_size, pesh.i_stream_id, p_block );
                 }
 
-                SendDataChain( p_demux, p_es, p_block );
+                SendDataChain( p_demux, p_es, p_block,
+                               i_byte_offset, i_byte_size );
             }
             else
             {
@@ -1891,6 +1900,13 @@ static block_t* ReadTSPacket( demux_t *p_demux )
         else
             msg_Dbg( p_demux, "Can't read TS packet at %"PRIu64, vlc_stream_Tell(p_sys->stream) );
         return NULL;
+    }
+
+    const uint64_t i_tell = vlc_stream_Tell( p_sys->stream );
+    if( i_tell >= p_sys->i_packet_size && p_sys->i_stream_size > 0 )
+    {
+        p_pkt->i_stream_offset = i_tell - p_sys->i_packet_size;
+        p_pkt->i_stream_size = p_sys->i_stream_size;
     }
 
     if( p_pkt->i_buffer < TS_HEADER_SIZE + p_sys->i_packet_header_size )

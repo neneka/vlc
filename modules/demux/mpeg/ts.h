@@ -66,6 +66,9 @@ struct demux_sys_t
     /* how many TS packet we read at once */
     unsigned    i_ts_read;
 
+    /* Cached byte length used to tag PES blocks without querying per packet. */
+    uint64_t    i_stream_size;
+
     bool        b_cc_check;
     bool        b_ignore_time_for_positions;
 

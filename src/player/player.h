@@ -209,6 +209,14 @@ struct vlc_player_timer_source
     };
 };
 
+#define VLC_PLAYER_BYTE_POSITION_HISTORY_SIZE 2048
+
+struct vlc_player_byte_position_point
+{
+    vlc_tick_t ts;
+    double position;
+};
+
 enum vlc_player_timer_event
 {
     VLC_PLAYER_TIMER_EVENT_PLAYING,
@@ -231,6 +239,14 @@ struct vlc_player_timer
     /* -1: unknown, 0: false, 1: true */
     int trust_demux_pos;
     bool position_anchor_initialized;
+
+    struct
+    {
+        struct vlc_player_byte_position_point
+            points[VLC_PLAYER_BYTE_POSITION_HISTORY_SIZE];
+        size_t next;
+        size_t count;
+    } byte_position_history;
 
     vlc_tick_t seek_ts;
     double seek_position;
@@ -536,6 +552,10 @@ int
 vlc_player_GetTimerPoint(vlc_player_t *player, bool *seeking,
                          vlc_tick_t system_now,
                          vlc_tick_t *out_ts, double *out_pos);
+
+bool
+vlc_player_GetByteSeekPosition(vlc_player_t *player, vlc_tick_t target_time,
+                               double *position);
 
 /*
  * player_vout.c

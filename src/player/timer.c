@@ -26,6 +26,47 @@
 
 #include "player.h"
 
+#define BYTE_POSITION_HISTORY_LENGTH VLC_TICK_FROM_SEC(30)
+#define BYTE_POSITION_RATE_WINDOW VLC_TICK_FROM_SEC(10)
+#define BYTE_POSITION_RATE_MIN_SPAN VLC_TICK_FROM_SEC(5)
+#define BYTE_POSITION_LOCAL_SEEK_MAX VLC_TICK_FROM_SEC(30)
+#define BYTE_POSITION_DIRECT_MAX_ERROR VLC_TICK_FROM_SEC(1)
+#define BYTE_POSITION_RATE_MIN_POINTS 8
+
+static void
+vlc_player_ResetBytePositionHistory(vlc_player_t *player)
+{
+    player->timer.byte_position_history.next = 0;
+    player->timer.byte_position_history.count = 0;
+}
+
+static void
+vlc_player_AddBytePositionPoint(vlc_player_t *player, vlc_tick_t ts,
+                                double position)
+{
+    size_t index = player->timer.byte_position_history.next;
+    player->timer.byte_position_history.points[index] =
+        (struct vlc_player_byte_position_point) {
+            .ts = ts,
+            .position = position,
+        };
+    player->timer.byte_position_history.next =
+        (index + 1) % VLC_PLAYER_BYTE_POSITION_HISTORY_SIZE;
+    if (player->timer.byte_position_history.count
+        < VLC_PLAYER_BYTE_POSITION_HISTORY_SIZE)
+        player->timer.byte_position_history.count++;
+}
+
+static double
+vlc_player_ClampPosition(double position)
+{
+    if (position < 0.0)
+        return 0.0;
+    if (position > 1.0)
+        return 1.0;
+    return position;
+}
+
 void
 vlc_player_ResetTimer(vlc_player_t *player)
 {
@@ -42,6 +83,7 @@ vlc_player_ResetTimer(vlc_player_t *player)
     player->timer.seek_position = -1;
     player->timer.trust_demux_pos = -1;
     player->timer.position_anchor_initialized = false;
+    vlc_player_ResetBytePositionHistory(player);
     player->timer.update_state = UPDATE_STATE_RESUMED;
     player->timer.pause_date = VLC_TICK_INVALID;
     player->timer.stopping = false;
@@ -259,6 +301,8 @@ vlc_player_UpdateTimerEvent(vlc_player_t *player, vlc_es_id_t *es_source,
                                              i == VLC_PLAYER_TIMER_TYPE_SMPTE);
                 }
                 source->point.system_date = VLC_TICK_INVALID;
+                if (i == VLC_PLAYER_TIMER_TYPE_BEST)
+                    vlc_player_ResetBytePositionHistory(player);
             }
             break;
 
@@ -350,14 +394,14 @@ vlc_player_UpdateTimerSeekState(vlc_player_t *player, vlc_tick_t time,
 static void
 vlc_player_UpdateTimerSource(vlc_player_t *player,
                              struct vlc_player_timer_source *source,
-                             double rate, vlc_tick_t ts, vlc_tick_t system_date)
+                             double rate, vlc_tick_t ts, vlc_tick_t system_date,
+                             double byte_position)
 {
     assert(ts >= VLC_TICK_0);
     assert(player->timer.input_normal_time >= VLC_TICK_0);
 
     const vlc_tick_t previous_system_date = source->point.system_date;
     const double previous_position = source->point.position;
-    const double previous_rate = source->point.rate;
 
     source->point.rate = rate;
     source->point.ts = ts - player->timer.input_normal_time - player->timer.start_offset + VLC_TICK_0;
@@ -412,7 +456,14 @@ vlc_player_UpdateTimerSource(vlc_player_t *player,
     {
         source->point.position = previous_position;
 
-        if (previous_system_date == VLC_TICK_INVALID)
+        if (byte_position >= 0.0)
+        {
+            source->point.position = vlc_player_ClampPosition(byte_position);
+            player->timer.position_anchor_initialized = true;
+            vlc_player_AddBytePositionPoint(player, source->point.ts,
+                                            source->point.position);
+        }
+        else if (previous_system_date == VLC_TICK_INVALID)
         {
             if (player->timer.seek_position >= 0.0)
             {
@@ -425,28 +476,21 @@ vlc_player_UpdateTimerSource(vlc_player_t *player,
                 /* The first output clock may arrive before input_normal_time
                  * is known, so its timestamp cannot establish a normalized
                  * position.  Playback without a pending seek starts at zero
-                 * and advances from presentation dates from this point on. */
+                 * and advances from output-clock updates from this point on. */
                 source->point.position = 0.0;
             }
 
             player->timer.position_anchor_initialized = true;
-        }
-        else if (system_date != VLC_TICK_INVALID &&
-                 system_date != VLC_TICK_MAX &&
-                 system_date >= previous_system_date)
-        {
-            /* Advance from the monotonic presentation date.  ES timestamps
-             * can jump on discontinuities and clock-source changes, while
-             * the presentation date represents media time actually played. */
-            source->point.position +=
-                (system_date - previous_system_date) * previous_rate
-                / (double) source->point.length;
         }
 
         if (source->point.position < 0.0)
             source->point.position = 0.0;
         else if (source->point.position > 1.0)
             source->point.position = 1.0;
+
+        /* Byte position is sampled on output-clock updates. Time-based
+         * interpolation would turn it back into a timestamp position. */
+        source->point.length = VLC_TICK_INVALID;
     }
     else
         source->point.position = player->timer.input_position;
@@ -465,8 +509,11 @@ vlc_player_UpdateTimerBestSource(vlc_player_t *player, vlc_es_id_t *es_source,
      * 3/ es_source == NULL (from the input)
      */
     struct vlc_player_timer_source *source = &player->timer.best_source;
+    vlc_es_id_t *previous_es = source->es;
     if (!source->es || es_source_is_master)
         source->es = es_source;
+    if (source->es != previous_es)
+        vlc_player_ResetBytePositionHistory(player);
 
     /* Notify the best source */
     if (source->es == es_source || force_update)
@@ -484,7 +531,7 @@ vlc_player_UpdateTimerBestSource(vlc_player_t *player, vlc_es_id_t *es_source,
           || (source->point.system_date != system_date && system_date != VLC_TICK_MAX))
         {
             vlc_player_UpdateTimerSource(player, source, point->rate, point->ts,
-                                         system_date);
+                                         system_date, point->position);
             player->timer.last_ts = point->ts;
 
             /* It is possible to receive valid points while seeking. These
@@ -537,7 +584,7 @@ vlc_player_UpdateTimerSmpteSource(vlc_player_t *player, vlc_es_id_t *es_source,
         if (source->smpte.frame_rate != 0)
         {
             vlc_player_UpdateTimerSource(player, source, point->rate, point->ts,
-                                         system_date);
+                                         system_date, point->position);
 
             if (!vlc_list_is_empty(&source->listeners))
                 vlc_player_SendSmpteTimerSourceUpdates(player, source,
@@ -648,9 +695,193 @@ vlc_player_RemoveTimerSource(vlc_player_t *player, vlc_es_id_t *es_source)
             /* Discontinuity should have been already signaled */
             assert(source->point.system_date == VLC_TICK_INVALID);
             source->es = NULL;
+            if (i == VLC_PLAYER_TIMER_TYPE_BEST)
+                vlc_player_ResetBytePositionHistory(player);
         }
     }
     vlc_mutex_unlock(&player->timer.lock);
+}
+
+static bool
+vlc_player_FindBytePosition(vlc_player_t *player, vlc_tick_t current_ts,
+                            vlc_tick_t target_ts, double *position)
+{
+    const struct vlc_player_byte_position_point *lower = NULL;
+    const struct vlc_player_byte_position_point *upper = NULL;
+
+    for (size_t i = 0; i < player->timer.byte_position_history.count; ++i)
+    {
+        const struct vlc_player_byte_position_point *point =
+            &player->timer.byte_position_history.points[i];
+        if (point->ts > current_ts || current_ts - point->ts
+                                      > BYTE_POSITION_HISTORY_LENGTH)
+            continue;
+
+        if (point->ts <= target_ts && (!lower || point->ts > lower->ts))
+            lower = point;
+        if (point->ts >= target_ts && (!upper || point->ts < upper->ts))
+            upper = point;
+    }
+
+    if (lower && upper)
+    {
+        if (lower->ts == upper->ts)
+            *position = lower->position;
+        else
+        {
+            const double fraction = (target_ts - lower->ts)
+                                  / (double) (upper->ts - lower->ts);
+            *position = lower->position
+                      + (upper->position - lower->position) * fraction;
+        }
+        return true;
+    }
+
+    const struct vlc_player_byte_position_point *nearest = lower ? lower : upper;
+    if (nearest)
+    {
+        const vlc_tick_t error = nearest->ts > target_ts
+                               ? nearest->ts - target_ts
+                               : target_ts - nearest->ts;
+        if (error <= BYTE_POSITION_DIRECT_MAX_ERROR)
+        {
+            *position = nearest->position;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool
+vlc_player_GetLocalBytePositionRate(vlc_player_t *player,
+                                    vlc_tick_t current_ts, double *rate,
+                                    vlc_tick_t *span)
+{
+    double sum_x = 0.0;
+    double sum_y = 0.0;
+    double sum_xx = 0.0;
+    double sum_xy = 0.0;
+    vlc_tick_t first_ts = VLC_TICK_MAX;
+    vlc_tick_t last_ts = VLC_TICK_INVALID;
+    size_t count = 0;
+
+    for (size_t i = 0; i < player->timer.byte_position_history.count; ++i)
+    {
+        const struct vlc_player_byte_position_point *point =
+            &player->timer.byte_position_history.points[i];
+        if (point->ts > current_ts || current_ts - point->ts
+                                      > BYTE_POSITION_RATE_WINDOW)
+            continue;
+
+        const double x = (point->ts - current_ts)
+                       / (double) VLC_TICK_FROM_SEC(1);
+        const double y = point->position;
+        sum_x += x;
+        sum_y += y;
+        sum_xx += x * x;
+        sum_xy += x * y;
+        if (point->ts < first_ts)
+            first_ts = point->ts;
+        if (point->ts > last_ts)
+            last_ts = point->ts;
+        count++;
+    }
+
+    if (count < BYTE_POSITION_RATE_MIN_POINTS || first_ts == VLC_TICK_MAX
+     || last_ts - first_ts < BYTE_POSITION_RATE_MIN_SPAN)
+        return false;
+
+    const double denominator = count * sum_xx - sum_x * sum_x;
+    if (denominator <= 0.0)
+        return false;
+
+    *rate = (count * sum_xy - sum_x * sum_y) / denominator;
+    *span = last_ts - first_ts;
+    return *rate > 0.0;
+}
+
+bool
+vlc_player_GetByteSeekPosition(vlc_player_t *player, vlc_tick_t target_time,
+                               double *position)
+{
+    vlc_mutex_lock(&player->timer.lock);
+
+    const struct vlc_player_timer_source *source = &player->timer.best_source;
+    if (player->timer.trust_demux_pos != 1 || source->es == NULL)
+    {
+        vlc_mutex_unlock(&player->timer.lock);
+        return false;
+    }
+
+    if (player->timer.byte_position_history.count == 0
+     || source->point.position < 0.0
+     || source->point.ts == VLC_TICK_INVALID)
+    {
+        if (player->timer.input_length <= 0)
+        {
+            vlc_mutex_unlock(&player->timer.lock);
+            return false;
+        }
+        *position = target_time / (double) player->timer.input_length;
+        *position = vlc_player_ClampPosition(*position);
+        vlc_mutex_unlock(&player->timer.lock);
+        return true;
+    }
+
+    const vlc_tick_t current_time = source->point.ts;
+    const vlc_tick_t time_delta = target_time - current_time;
+
+    /* A recent backward target already has a presented byte mapping, so it
+     * is more accurate than extrapolating either a local or global rate. */
+    if (target_time <= current_time
+     && current_time - target_time <= BYTE_POSITION_HISTORY_LENGTH
+     && vlc_player_FindBytePosition(player, current_time, target_time,
+                                    position))
+    {
+        *position = vlc_player_ClampPosition(*position);
+        vlc_mutex_unlock(&player->timer.lock);
+        return true;
+    }
+
+    if (player->timer.input_length <= 0)
+    {
+        vlc_mutex_unlock(&player->timer.lock);
+        return false;
+    }
+
+    const double global_rate = VLC_TICK_FROM_SEC(1)
+                             / (double) player->timer.input_length;
+    double seek_rate = global_rate;
+    const vlc_tick_t abs_delta = time_delta < 0 ? -time_delta : time_delta;
+
+    if (abs_delta <= BYTE_POSITION_LOCAL_SEEK_MAX)
+    {
+        double local_rate;
+        vlc_tick_t span;
+        if (vlc_player_GetLocalBytePositionRate(player, current_time,
+                                                &local_rate, &span))
+        {
+            if (local_rate < global_rate * 0.25)
+                local_rate = global_rate * 0.25;
+            else if (local_rate > global_rate * 4.0)
+                local_rate = global_rate * 4.0;
+
+            /* Fade the local estimate in between five and ten seconds of
+             * samples to avoid noisy startup and post-discontinuity rates. */
+            double weight = (span - BYTE_POSITION_RATE_MIN_SPAN)
+                          / (double) (BYTE_POSITION_RATE_WINDOW
+                                    - BYTE_POSITION_RATE_MIN_SPAN);
+            if (weight > 1.0)
+                weight = 1.0;
+            seek_rate = global_rate + (local_rate - global_rate) * weight;
+        }
+    }
+
+    *position = source->point.position
+              + time_delta / (double) VLC_TICK_FROM_SEC(1) * seek_rate;
+    *position = vlc_player_ClampPosition(*position);
+    vlc_mutex_unlock(&player->timer.lock);
+    return true;
 }
 
 int

@@ -193,6 +193,7 @@ struct vlc_input_event_output_clock
     bool master;
     vlc_tick_t system_ts;
     vlc_tick_t ts;
+    double byte_position;
     double rate;
     unsigned frame_rate;
     unsigned frame_rate_base;
