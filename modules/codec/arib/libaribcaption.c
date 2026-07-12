@@ -155,10 +155,10 @@ static void SubpictureUpdate(subpicture_t *p_subpic,
     unsigned i_sar_num = p_src_format->i_sar_num > 0 ? p_src_format->i_sar_num : 1;
     unsigned i_sar_den = p_src_format->i_sar_den > 0 ? p_src_format->i_sar_den : 1;
 
-    unsigned i_render_area_height = p_dst_format->i_visible_height & ~3;
+    unsigned i_render_area_height = p_dst_format->i_visible_height;
     unsigned i_render_area_width = (uint64_t)i_render_area_height *
                                    p_src_format->i_visible_width * i_sar_num /
-                                   (p_src_format->i_visible_height * i_sar_den) & ~3;
+                                   (p_src_format->i_visible_height * i_sar_den);
 
     if (b_src_changed || b_dst_changed) {
         /* don't let library freely scale using either the min of width or height ratio */
@@ -476,6 +476,7 @@ static int Open(vlc_object_t *p_this)
     }
 
     aribcc_renderer_set_storage_policy(p_renderer, ARIBCC_CAPTION_STORAGE_POLICY_MINIMUM, 0);
+    aribcc_renderer_set_merge_region_images(p_renderer, true);
 
     bool b_cfg_replace_drcs = var_InheritBool(p_this, ARIBCAPTION_CFG_PREFIX "replace-drcs");
     bool b_cfg_force_stroke_text = var_InheritBool(p_this, ARIBCAPTION_CFG_PREFIX "force-stroke-text");
