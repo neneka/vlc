@@ -336,6 +336,7 @@ static int ADTSSyncInfo(decoder_t * p_dec, const uint8_t * p_buf,
                          unsigned int * pi_frame_length,
                          unsigned int * pi_header_size)
 {
+    decoder_sys_t *p_sys = p_dec->p_sys;
     int i_profile, i_sample_rate_idx, i_frame_size;
     bool b_crc;
 
@@ -401,17 +402,27 @@ static int ADTSSyncInfo(decoder_t * p_dec, const uint8_t * p_buf,
     }
 
 
-    /* Build the decoder specific info header */
-    if (!p_dec->fmt_out.i_extra) {
-        p_dec->fmt_out.p_extra = malloc(2);
-        if (!p_dec->fmt_out.p_extra)
-            return 0;
-        p_dec->fmt_out.i_extra = 2;
-        ((uint8_t *)p_dec->fmt_out.p_extra)[0] =
-            (i_profile + 1) << 3 | (i_sample_rate_idx >> 1);
-        ((uint8_t *)p_dec->fmt_out.p_extra)[1] =
-            ((i_sample_rate_idx & 0x01) << 7) | (*pi_channels <<3);
+    /* Keep the decoder configuration in sync with every ADTS header. */
+    const uint8_t extra[2] = {
+        (i_profile + 1) << 3 | (i_sample_rate_idx >> 1),
+        ((i_sample_rate_idx & 0x01) << 7) | (*pi_channels << 3),
+    };
+    if ((size_t)p_dec->fmt_out.i_extra != sizeof(extra) ||
+        memcmp(p_dec->fmt_out.p_extra, extra, sizeof(extra)))
+    {
+        if ((size_t)p_dec->fmt_out.i_extra != sizeof(extra))
+        {
+            void *p_extra = malloc(sizeof(extra));
+            if (!p_extra)
+                return 0;
+
+            free(p_dec->fmt_out.p_extra);
+            p_dec->fmt_out.p_extra = p_extra;
+            p_dec->fmt_out.i_extra = sizeof(extra);
+        }
+        memcpy(p_dec->fmt_out.p_extra, extra, sizeof(extra));
     }
+    p_sys->i_aac_profile = AOTtoAACProfile(i_profile + 1);
 
     /* ADTS header length */
     *pi_header_size = b_crc ? 9 : 7;
