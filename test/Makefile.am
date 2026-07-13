@@ -77,6 +77,7 @@ check_PROGRAMS = \
 	test_modules_packetizer_hxxx \
 	test_modules_packetizer_h264 \
 	test_modules_packetizer_hevc \
+	test_modules_packetizer_mpeg4audio \
 	test_modules_packetizer_mpegvideo \
 	test_modules_codec_hxxx_helper \
 	test_modules_codec_cea708_aspect_ratio \
@@ -347,6 +348,8 @@ test_modules_packetizer_h264_LDADD = $(LIBVLCCORE) $(LIBVLC)
 test_modules_packetizer_hevc_SOURCES = modules/packetizer/hevc.c \
 				modules/packetizer/packetizer.h
 test_modules_packetizer_hevc_LDADD = $(LIBVLCCORE) $(LIBVLC)
+test_modules_packetizer_mpeg4audio_SOURCES = modules/packetizer/mpeg4audio.c
+test_modules_packetizer_mpeg4audio_LDADD = $(LIBVLCCORE) $(LIBVLC)
 test_modules_packetizer_mpegvideo_SOURCES = modules/packetizer/mpegvideo.c \
 				modules/packetizer/packetizer.h
 test_modules_packetizer_mpegvideo_LDADD = $(LIBVLCCORE) $(LIBVLC)
