@@ -1484,8 +1484,6 @@ static void TsStoragePopCmd( ts_storage_t *p_storage, ts_cmd_t *p_cmd, bool b_fl
                 p_block->i_flags    = block.i_flags;
                 p_block->i_length   = block.i_length;
                 p_block->i_nb_samples = block.i_nb_samples;
-                p_block->i_stream_offset = block.i_stream_offset;
-                p_block->i_stream_size = block.i_stream_size;
                 p_block->i_buffer = fread( p_block->p_buffer, 1, block.i_buffer, p_storage->p_filer );
             }
             p_cmd->send.p_block = p_block;

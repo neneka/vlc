@@ -74,14 +74,13 @@ static inline void input_SendEventTimes(input_thread_t *p_input,
 static inline void input_SendEventOutputClock(input_thread_t *p_input,
                                               vlc_es_id_t *id, bool master,
                                               vlc_tick_t system_ts,
-                                              vlc_tick_t ts, double byte_position,
-                                              double rate,
+                                              vlc_tick_t ts, double rate,
                                               unsigned frame_rate,
                                               unsigned frame_rate_base)
 {
     input_SendEvent(p_input, &(struct vlc_input_event) {
         .type = INPUT_EVENT_OUTPUT_CLOCK,
-        .output_clock = { id, master, system_ts, ts, byte_position, rate,
+        .output_clock = { id, master, system_ts, ts, rate,
                           frame_rate, frame_rate_base }
     });
 }

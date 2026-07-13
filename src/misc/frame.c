@@ -73,8 +73,6 @@ void vlc_frame_CopyProperties(vlc_frame_t *restrict dst, const vlc_frame_t *src)
     dst->i_dts     = src->i_dts;
     dst->i_pts     = src->i_pts;
     dst->i_length  = src->i_length;
-    dst->i_stream_offset = src->i_stream_offset;
-    dst->i_stream_size = src->i_stream_size;
 }
 
 vlc_frame_t *vlc_frame_New(const struct vlc_frame_callbacks *cbs,
@@ -101,8 +99,6 @@ vlc_frame_t *vlc_frame_Init(vlc_frame_t *restrict f, const struct vlc_frame_call
     f->i_pts =
     f->i_dts = VLC_TICK_INVALID;
     f->i_length = 0;
-    f->i_stream_offset = 0;
-    f->i_stream_size = 0;
     vlc_ancillary_array_Init(&f->ancillaries);
     f->cbs = cbs;
     return f;

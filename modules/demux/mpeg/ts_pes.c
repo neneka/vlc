@@ -47,7 +47,6 @@ static bool block_Split( block_t **pp_block, block_t **pp_remain, size_t i_offse
             p_split = block_Alloc( i_offset );
             if( p_split == NULL )
                 return false;
-            block_CopyProperties( p_split, p_block );
             memcpy( p_split->p_buffer, p_block->p_buffer, i_offset );
             p_block->p_buffer += i_offset;
             p_block->i_buffer -= i_offset;
@@ -62,7 +61,6 @@ static bool block_Split( block_t **pp_block, block_t **pp_remain, size_t i_offse
             p_split = block_Alloc( i_tocopy );
             if( p_split == NULL )
                 return false;
-            block_CopyProperties( p_split, p_block );
             memcpy( p_split->p_buffer, &p_block->p_buffer[i_offset], i_tocopy );
             p_block->i_buffer -= i_tocopy;
         }

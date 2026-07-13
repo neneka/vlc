@@ -133,10 +133,6 @@ struct vlc_frame_t
     vlc_tick_t  i_dts;
     vlc_tick_t  i_length;
 
-    /** Byte offset and total input size, when supplied by the demuxer. */
-    uint64_t    i_stream_offset;
-    uint64_t    i_stream_size;
-
     vlc_ancillary_array ancillaries;
 
     const struct vlc_frame_callbacks *cbs;
@@ -298,7 +294,7 @@ vlc_frame_GetAncillary(vlc_frame_t *frame, vlc_ancillary_id id)
 /**
  * Copy frame properties from src to dst
  *
- * Copy i_flags, i_nb_samples, i_dts, i_pts, i_length, and the input byte range.
+ * Copy i_flags, i_nb_samples, i_dts, i_pts, and i_length.
  *
  * @note if src has an ancillary, the ancillary will be copied and refcounted
  * to dst.
@@ -605,8 +601,6 @@ static inline vlc_frame_t *vlc_frame_ChainGather( vlc_frame_t *p_list )
     g->i_pts   = p_list->i_pts;
     g->i_dts   = p_list->i_dts;
     g->i_length = i_length;
-    g->i_stream_offset = p_list->i_stream_offset;
-    g->i_stream_size = p_list->i_stream_size;
 
     /* free p_list */
     vlc_frame_ChainRelease( p_list );
