@@ -27,12 +27,19 @@ an absolute stream position using the probed time range:
 start    = first PCR, or first DTS
 end      = last DTS + PCR offset
 fraction = clamp((target - start) / (end - start), 0, 1)
-byte     = stream size * fraction
+byte     = first timestamp byte
+         + (last timestamp byte - first timestamp byte) * fraction
 ```
 
 It then calls `vlc_stream_Seek()` once. No PCR scan or binary timestamp search
 is performed after that seek. The result is intentionally approximate and can
 differ from the requested time for variable-bitrate streams.
+
+Both timestamp probes retain their corresponding byte offsets. This keeps the
+time and byte ranges on the same origin when the selected program starts after
+leading TS data. Stream filters installed after initial PMT parsing also adopt
+the current source offset before probing, so a logical seek to byte zero is not
+mistaken for the source's current position.
 
 ## Fast seek and reported position
 

@@ -1941,7 +1941,8 @@ static int SeekToTime( demux_t *p_demux, const ts_pmt_t *p_pmt, vlc_tick_t i_see
     demux_sys_t *p_sys = p_demux->p_sys;
 
     /* Deal with common but worst binary search case */
-    if( p_pmt->pcr.i_first == i_seektime && p_sys->b_canseek )
+    if( p_sys->b_canfastseek && p_pmt->pcr.i_first == i_seektime &&
+        p_sys->b_canseek )
         return vlc_stream_Seek( p_sys->stream, 0 );
 
     uint64_t i_stream_size;
@@ -1953,12 +1954,16 @@ static int SeekToTime( demux_t *p_demux, const ts_pmt_t *p_pmt, vlc_tick_t i_see
 
     if( !p_sys->b_canfastseek )
     {
-        /* Use the probed duration for one approximate byte seek. */
+        /* Use matching probed timestamp and byte bounds for one seek. */
         const vlc_tick_t i_start = p_pmt->pcr.i_first != VLC_TICK_INVALID
                                  ? p_pmt->pcr.i_first
                                  : p_pmt->pcr.i_first_dts;
+        const uint64_t i_start_byte = p_pmt->pcr.i_first != VLC_TICK_INVALID
+                                    ? p_pmt->pcr.i_first_byte
+                                    : p_pmt->pcr.i_first_dts_byte;
         if( i_start == VLC_TICK_INVALID ||
-            p_pmt->i_last_dts == VLC_TICK_INVALID )
+            p_pmt->i_last_dts == VLC_TICK_INVALID ||
+            i_start_byte >= p_pmt->i_last_dts_byte )
             return VLC_EGENERIC;
 
         const vlc_tick_t i_last = p_pmt->i_last_dts + p_pmt->pcr.i_pcroffset;
@@ -1971,8 +1976,10 @@ static int SeekToTime( demux_t *p_demux, const ts_pmt_t *p_pmt, vlc_tick_t i_see
         else if( f_position > 1.0 )
             f_position = 1.0;
 
-        return vlc_stream_Seek( p_sys->stream,
-                                (uint64_t)(i_stream_size * f_position) );
+        const uint64_t i_byte_span = p_pmt->i_last_dts_byte - i_start_byte;
+        const uint64_t i_target_byte = i_start_byte +
+                                       (uint64_t)(i_byte_span * f_position);
+        return vlc_stream_Seek( p_sys->stream, i_target_byte );
     }
 
     const uint64_t i_initial_pos = vlc_stream_Tell( p_sys->stream );
@@ -2137,10 +2144,12 @@ static int ProbeChunk( demux_t *p_demux, int i_program, bool b_end, bool *pb_fou
                         else if( b_pcrresult && p_pmt->pcr.i_first == VLC_TICK_INVALID )
                         {
                             p_pmt->pcr.i_first = FROM_SCALE(i_pcr);
+                            p_pmt->pcr.i_first_byte = vlc_stream_Tell( p_sys->stream );
                         }
                         else if( p_pmt->pcr.i_first_dts == VLC_TICK_INVALID )
                         {
                             p_pmt->pcr.i_first_dts = FROM_SCALE(i_pcr);
+                            p_pmt->pcr.i_first_dts_byte = vlc_stream_Tell( p_sys->stream );
                         }
 
                         if( i_program == 0 || i_program == p_pmt->i_number )
@@ -2289,6 +2298,7 @@ static void ProgramSetPCR( demux_t *p_demux, ts_pmt_t *p_pmt, vlc_tick_t i_pcr )
     if( p_pmt->pcr.i_first == VLC_TICK_INVALID )
     {
         p_pmt->pcr.i_first = i_pcr; // now seen
+        p_pmt->pcr.i_first_byte = vlc_stream_Tell( p_sys->stream );
     }
 
     if ( p_sys->i_pmt_es )
@@ -2500,6 +2510,7 @@ static void PCRFixHandle( demux_t *p_demux, ts_pmt_t *p_pmt, block_t *p_block )
     else if( p_pmt->pcr.i_first_dts == VLC_TICK_INVALID )
     {
         p_pmt->pcr.i_first_dts = p_block->i_dts;
+        p_pmt->pcr.i_first_dts_byte = vlc_stream_Tell( p_sys->stream );
     }
     else if( p_block->i_dts - p_pmt->pcr.i_first_dts > VLC_TICK_FROM_MS(500) ) /* "PCR repeat rate shall not exceed 100ms" */
     {
