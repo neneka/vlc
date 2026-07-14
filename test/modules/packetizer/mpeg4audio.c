@@ -85,7 +85,7 @@ static block_t *PacketizeNext(decoder_t *packetizer, block_t **input)
     return output;
 }
 
-int main(void)
+static void TestChannelConfigurationChanges(libvlc_instance_t *vlc)
 {
     /* Four one-byte AAC payloads: two 5.1 frames followed by two stereo
      * frames. The fourth header lets the packetizer validate the third. */
@@ -97,10 +97,6 @@ int main(void)
     };
     static const uint8_t asc_5_1[] = { 0x11, 0xb0 };
     static const uint8_t asc_stereo[] = { 0x11, 0x90 };
-
-    test_init();
-    libvlc_instance_t *vlc = libvlc_new(0, NULL);
-    assert(vlc != NULL);
 
     decoder_t *packetizer = CreatePacketizer(vlc);
     assert(packetizer != NULL);
@@ -138,6 +134,65 @@ int main(void)
 
     es_format_Clean(&fmt_5_1);
     DeletePacketizer(packetizer);
+}
+
+static void TestDualMonoChanges(libvlc_instance_t *vlc)
+{
+    /* Stereo, dual mono, then stereo again. The final header lets the
+     * packetizer validate and return the preceding stereo frame. */
+    static const uint8_t adts[] = {
+        0xff, 0xf1, 0x4c, 0x80, 0x01, 0x1f, 0xfc, 0x00,
+        0xff, 0xf1, 0x4c, 0x00, 0x01, 0x1f, 0xfc, 0x00,
+        0xff, 0xf1, 0x4c, 0x80, 0x01, 0x1f, 0xfc, 0x00,
+        0xff, 0xf1, 0x4c, 0x80, 0x01, 0x1f, 0xfc, 0x00,
+    };
+
+    decoder_t *packetizer = CreatePacketizer(vlc);
+    assert(packetizer != NULL);
+
+    block_t *input = block_Alloc(sizeof(adts));
+    assert(input != NULL);
+    memcpy(input->p_buffer, adts, sizeof(adts));
+    input->i_pts = VLC_TICK_0;
+
+    block_t *output = PacketizeNext(packetizer, &input);
+    assert(output != NULL);
+    assert(!(packetizer->fmt_out.audio.i_chan_mode &
+             AOUT_CHANMODE_DUALMONO));
+
+    es_format_t fmt_stereo;
+    es_format_Init(&fmt_stereo, UNKNOWN_ES, 0);
+    assert(es_format_Copy(&fmt_stereo, &packetizer->fmt_out) == VLC_SUCCESS);
+    block_Release(output);
+
+    output = PacketizeNext(packetizer, &input);
+    assert(output != NULL);
+    assert(packetizer->fmt_out.audio.i_channels == 2);
+    assert(packetizer->fmt_out.audio.i_chan_mode & AOUT_CHANMODE_DUALMONO);
+    assert(!es_format_IsSimilar(&fmt_stereo, &packetizer->fmt_out));
+    block_Release(output);
+
+    output = PacketizeNext(packetizer, &input);
+    assert(output != NULL);
+    assert(!(packetizer->fmt_out.audio.i_chan_mode &
+             AOUT_CHANMODE_DUALMONO));
+    assert(es_format_IsSimilar(&fmt_stereo, &packetizer->fmt_out));
+    block_Release(output);
+    block_Release(input);
+
+    es_format_Clean(&fmt_stereo);
+    DeletePacketizer(packetizer);
+}
+
+int main(void)
+{
+    test_init();
+    libvlc_instance_t *vlc = libvlc_new(0, NULL);
+    assert(vlc != NULL);
+
+    TestChannelConfigurationChanges(vlc);
+    TestDualMonoChanges(vlc);
+
     libvlc_release(vlc);
     return 0;
 }

@@ -53,6 +53,7 @@ typedef struct libvlc_audio_track_t
 {
     unsigned    i_channels;
     unsigned    i_rate;
+    bool        b_dual_mono;
 } libvlc_audio_track_t;
 
 /**
