@@ -347,7 +347,9 @@ static int ADTSSyncInfo(decoder_t * p_dec, const uint8_t * p_buf,
     i_sample_rate_idx = (p_buf[2] >> 2) & 0x0f;
     *pi_sample_rate = pi_sample_rates[i_sample_rate_idx];
     //private_bit = (p_buf[2] >> 1) & 0x01;
-    *pi_channels = ((p_buf[2] & 0x01) << 2) | ((p_buf[3] >> 6) & 0x03);
+    const unsigned i_channel_configuration =
+        ((p_buf[2] & 0x01) << 2) | ((p_buf[3] >> 6) & 0x03);
+    *pi_channels = i_channel_configuration;
     if (*pi_channels == 0) /* workaround broken streams */
         *pi_channels = 2;
     //original_copy = (p_buf[3] >> 5) & 0x01;
@@ -400,6 +402,14 @@ static int ADTSSyncInfo(decoder_t * p_dec, const uint8_t * p_buf,
         }
 #endif
     }
+
+    /* Japanese DTV dual mono uses two SCEs with channel_configuration 0.
+     * The packetizer already exposes these streams as two channels, so retain
+     * the signaling in the channel mode for the audio output. */
+    if (i_channel_configuration == 0)
+        p_dec->fmt_out.audio.i_chan_mode |= AOUT_CHANMODE_DUALMONO;
+    else
+        p_dec->fmt_out.audio.i_chan_mode &= ~AOUT_CHANMODE_DUALMONO;
 
 
     /* Keep the decoder configuration in sync with every ADTS header. */

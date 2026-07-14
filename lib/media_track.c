@@ -101,6 +101,8 @@ libvlc_media_trackpriv_from_es( libvlc_media_trackpriv_t *trackpriv,
         track->i_type = libvlc_track_audio;
         track->audio->i_channels = es->audio.i_channels;
         track->audio->i_rate = es->audio.i_rate;
+        track->audio->b_dual_mono =
+            (es->audio.i_chan_mode & AOUT_CHANMODE_DUALMONO) != 0;
         break;
     case SPU_ES:
         track->subtitle = &trackpriv->subtitle;
