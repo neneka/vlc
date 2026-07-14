@@ -61,8 +61,18 @@ struct ts_pmt_t
     {
         vlc_tick_t i_current;
         vlc_tick_t i_first; // seen <> != TS_TICK_UNKNOWN
+        uint64_t i_first_byte;
+        struct
+        {
+            uint64_t i_current_byte;
+            vlc_tick_t i_anchor_time;
+            uint64_t i_anchor_byte;
+            vlc_tick_t i_sample_time;
+            uint64_t i_sample_byte;
+        } seek;
         /* broken PCR handling */
         vlc_tick_t i_first_dts;
+        uint64_t i_first_dts_byte;
         vlc_tick_t i_pcroffset;
         bool    b_disable; /* ignore PCR field, use dts */
         bool    b_fix_done;

@@ -113,8 +113,13 @@ ts_pmt_t *ts_pmt_New( demux_t *p_demux )
 
     pmt->pcr.i_current = VLC_TICK_INVALID;
     pmt->pcr.i_first  = VLC_TICK_INVALID;
+    pmt->pcr.i_first_byte = 0;
+    pmt->pcr.seek.i_current_byte = 0;
+    pmt->pcr.seek.i_anchor_time = VLC_TICK_INVALID;
+    pmt->pcr.seek.i_sample_time = VLC_TICK_INVALID;
     pmt->pcr.b_disable = false;
     pmt->pcr.i_first_dts = VLC_TICK_INVALID;
+    pmt->pcr.i_first_dts_byte = 0;
     pmt->pcr.i_pcroffset = -1;
 
     pmt->pcr.b_fix_done = false;
