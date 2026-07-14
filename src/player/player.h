@@ -228,10 +228,6 @@ struct vlc_player_timer
     vlc_tick_t start_offset;
     double input_position;
 
-    /* -1: unknown, 0: false, 1: true */
-    int trust_demux_pos;
-    bool position_anchor_initialized;
-
     vlc_tick_t seek_ts;
     double seek_position;
     enum

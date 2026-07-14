@@ -503,10 +503,6 @@ static int Open( vlc_object_t *p_this )
     p_sys->b_ignore_time_for_positions = var_InheritBool( p_demux, "ts-seek-percent" );
     p_sys->b_cc_check = var_InheritBool( p_demux, "ts-cc-check" );
 
-    /* p_demuxにMPEG-TSであることを埋め込む */
-    var_Create(p_demux, "is-mpegts", VLC_VAR_BOOL);
-    var_SetBool(p_demux, "is-mpegts", true);
-
     p_sys->standard = TS_STANDARD_AUTO;
     char *psz_standard = var_InheritString( p_demux, "ts-standard" );
     if( psz_standard )
@@ -932,21 +928,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
     case DEMUX_GET_POSITION:
         pf = va_arg( args, double * );
 
-        /* Access control test is because EPG for recordings is not relevant */
-        if( false && p_sys->b_access_control )
-        {
-            time_t i_time, i_length;
-            if( !EITCurrentEventTime( p_pmt, p_sys, &i_time, &i_length ) && i_length > 0 )
-            {
-                *pf = (double)i_time/(double)i_length;
-                return VLC_SUCCESS;
-            }
-        }
-
-        if( !p_sys->b_ignore_time_for_positions &&
-             // PCRを用いた現在位置計算はcanfastseek(ローカルファイル)時のみ
-             p_sys->b_canfastseek &&
-             p_pmt &&
+        if( !p_sys->b_ignore_time_for_positions && p_pmt &&
              p_pmt->pcr.i_first != VLC_TICK_INVALID &&
              p_pmt->i_last_dts != VLC_TICK_INVALID &&
              p_pmt->pcr.i_current != VLC_TICK_INVALID )
@@ -976,24 +958,11 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
         if(!p_sys->b_canseek)
             break;
 
-        if( false && p_sys->b_access_control &&
-           !p_sys->b_ignore_time_for_positions && b_bool && p_pmt )
-        {
-            time_t i_time, i_length = 0;
-            vlc_tick_t i_seektime = VLC_TICK_0 + vlc_tick_from_sec( i_length * f );
-            if( !EITCurrentEventTime( p_pmt, p_sys, &i_time, &i_length ) &&
-                 i_length > 0 && !SeekToTime( p_demux, p_pmt, i_seektime ) )
-            {
-                ReadyQueuesPostSeek( p_demux );
-                es_out_Control( p_demux->out, ES_OUT_SET_NEXT_DISPLAY_TIME, i_seektime );
-                return VLC_SUCCESS;
-            }
-        }
-
-        if( !p_sys->b_ignore_time_for_positions && b_bool && p_pmt &&
-             p_pmt->pcr.i_first != VLC_TICK_INVALID &&
-             p_pmt->i_last_dts != VLC_TICK_INVALID &&
-             p_pmt->pcr.i_current != VLC_TICK_INVALID )
+        if( p_sys->b_canfastseek && !p_sys->b_ignore_time_for_positions &&
+            b_bool && p_pmt &&
+            p_pmt->pcr.i_first != VLC_TICK_INVALID &&
+            p_pmt->i_last_dts != VLC_TICK_INVALID &&
+            p_pmt->pcr.i_current != VLC_TICK_INVALID )
         {
             vlc_tick_t i_length = p_pmt->i_last_dts - p_pmt->pcr.i_first;
             i64 = p_pmt->pcr.i_first + i_length * f;
@@ -1030,50 +999,22 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
                 return VLC_SUCCESS;
             }
         }
-        else if( !p_sys->b_canfastseek && p_pmt &&
-                 p_pmt->pcr.i_current != VLC_TICK_INVALID &&
-                 ( p_pmt->pcr.i_first != VLC_TICK_INVALID || p_pmt->pcr.i_first_dts != VLC_TICK_INVALID ) &&
-                 p_pmt->i_last_dts != VLC_TICK_INVALID )
+        else if( !p_sys->b_canfastseek && p_sys->b_canseek && p_pmt )
         {
-            /* 非高速シーク時（ストリーム等）のフォールバックを、
-             * 現在の絶対バイト位置を基準にした相対移動で行う。 */
-            vlc_tick_t i_start = (p_pmt->pcr.i_first != VLC_TICK_INVALID) ? p_pmt->pcr.i_first :
-                                  p_pmt->pcr.i_first_dts;
-            vlc_tick_t i_last = p_pmt->i_last_dts + p_pmt->pcr.i_pcroffset;
-            vlc_tick_t i_duration = i_last - i_start;
-
-            uint64_t u64;
-            if( i_duration > 0 && vlc_stream_GetSize( p_sys->stream, &u64 ) == VLC_SUCCESS )
+            vlc_tick_t i_start = p_pmt->pcr.i_first != VLC_TICK_INVALID
+                               ? p_pmt->pcr.i_first
+                               : p_pmt->pcr.i_first_dts;
+            if( i_start != VLC_TICK_INVALID &&
+                !SeekToTime( p_demux, p_pmt, i_start + i_time ) )
             {
-                double f_current_pos = (double)vlc_stream_Tell( p_sys->stream ) / (double)u64;
-                vlc_tick_t i_current_time = p_pmt->pcr.i_current - p_pmt->pcr.i_first;
-                double f_diff = (double)(i_time - i_current_time) / (double)i_duration;
-                double f_target = f_current_pos + f_diff;
-
-                if( f_target < 0.0 ) f_target = 0.0;
-                else if( f_target > 1.0 ) f_target = 1.0;
-
-                if( vlc_stream_Seek( p_sys->stream, (uint64_t)(u64 * f_target) ) == VLC_SUCCESS )
-                {
-                    ReadyQueuesPostSeek( p_demux );
-                    return VLC_SUCCESS;
-                }
+                ReadyQueuesPostSeek( p_demux );
+                return VLC_SUCCESS;
             }
         }
         break;
     }
 
     case DEMUX_GET_TIME:
-        if( false && p_sys->b_access_control )
-        {
-            time_t i_event_start;
-            if( !EITCurrentEventTime( p_pmt, p_sys, &i_event_start, NULL ) )
-            {
-                *va_arg( args, vlc_tick_t * ) = vlc_tick_from_sec( i_event_start );
-                return VLC_SUCCESS;
-            }
-        }
-
         if( p_pmt && p_pmt->pcr.i_current != VLC_TICK_INVALID && p_pmt->pcr.i_first != VLC_TICK_INVALID )
         {
             *va_arg( args, vlc_tick_t * ) = p_pmt->pcr.i_current - p_pmt->pcr.i_first;
@@ -1090,23 +1031,13 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
         return VLC_SUCCESS;
 
     case DEMUX_GET_LENGTH:
-        if( false && p_sys->b_access_control )
-        {
-            time_t i_event_duration;
-            if( !EITCurrentEventTime( p_pmt, p_sys, NULL, &i_event_duration ) )
-            {
-                *va_arg( args, vlc_tick_t * ) = vlc_tick_from_sec( i_event_duration );
-                return VLC_SUCCESS;
-            }
-        }
-
-        // ts-seek-percentが有効でも長さは取らせる
         if( p_pmt &&
            ( p_pmt->pcr.i_first != VLC_TICK_INVALID || p_pmt->pcr.i_first_dts != VLC_TICK_INVALID ) &&
              p_pmt->i_last_dts != VLC_TICK_INVALID )
         {
-            vlc_tick_t i_start = (p_pmt->pcr.i_first != VLC_TICK_INVALID) ? p_pmt->pcr.i_first :
-                                  p_pmt->pcr.i_first_dts;
+            vlc_tick_t i_start = p_pmt->pcr.i_first != VLC_TICK_INVALID
+                               ? p_pmt->pcr.i_first
+                               : p_pmt->pcr.i_first_dts;
             vlc_tick_t i_last = p_pmt->i_last_dts;
             i_last += p_pmt->pcr.i_pcroffset;
             if( i_start > i_last )
@@ -1963,6 +1894,60 @@ static inline void FlushESBuffer( ts_stream_t *p_pes )
         ts_stream_processor_Reset( p_pes->p_proc );
 }
 
+#define SEEK_RATE_MIN_WINDOW      VLC_TICK_FROM_SEC(15)
+#define SEEK_RATE_WINDOW          VLC_TICK_FROM_SEC(30)
+#define SEEK_LOCAL_MAX_DELTA      VLC_TICK_FROM_SEC(60)
+
+static void PCRSeekHistoryReset( ts_pmt_t *p_pmt )
+{
+    p_pmt->pcr.seek.i_current_byte = 0;
+    p_pmt->pcr.seek.i_anchor_time = VLC_TICK_INVALID;
+    p_pmt->pcr.seek.i_sample_time = VLC_TICK_INVALID;
+}
+
+static void PCRSeekHistoryUpdate( ts_pmt_t *p_pmt, vlc_tick_t i_time,
+                                  uint64_t i_byte )
+{
+    if( p_pmt->pcr.i_current == VLC_TICK_INVALID ||
+        i_time < p_pmt->pcr.i_current ||
+        i_byte < p_pmt->pcr.seek.i_current_byte )
+        PCRSeekHistoryReset( p_pmt );
+
+    p_pmt->pcr.seek.i_current_byte = i_byte;
+
+    if( p_pmt->pcr.seek.i_sample_time == VLC_TICK_INVALID )
+    {
+        p_pmt->pcr.seek.i_anchor_time = i_time;
+        p_pmt->pcr.seek.i_anchor_byte = i_byte;
+        p_pmt->pcr.seek.i_sample_time = i_time;
+        p_pmt->pcr.seek.i_sample_byte = i_byte;
+    }
+    else if( i_time - p_pmt->pcr.seek.i_sample_time >= SEEK_RATE_MIN_WINDOW )
+    {
+        p_pmt->pcr.seek.i_anchor_time = p_pmt->pcr.seek.i_sample_time;
+        p_pmt->pcr.seek.i_anchor_byte = p_pmt->pcr.seek.i_sample_byte;
+        p_pmt->pcr.seek.i_sample_time = i_time;
+        p_pmt->pcr.seek.i_sample_byte = i_byte;
+    }
+}
+
+static bool PCRSeekLocalRate( const ts_pmt_t *p_pmt, double *pf_rate )
+{
+    const vlc_tick_t i_current = p_pmt->pcr.i_current;
+    const uint64_t i_current_byte = p_pmt->pcr.seek.i_current_byte;
+    if( p_pmt->pcr.seek.i_anchor_time == VLC_TICK_INVALID )
+        return false;
+
+    const vlc_tick_t i_age = i_current - p_pmt->pcr.seek.i_anchor_time;
+    if( i_age < SEEK_RATE_MIN_WINDOW || i_age > SEEK_RATE_WINDOW ||
+        p_pmt->pcr.seek.i_anchor_byte >= i_current_byte )
+        return false;
+
+    *pf_rate = (i_current_byte - p_pmt->pcr.seek.i_anchor_byte) /
+               (double)i_age;
+    return true;
+}
+
 static void ReadyQueuesPostSeek( demux_t *p_demux )
 {
     demux_sys_t *p_sys = p_demux->p_sys;
@@ -2002,6 +1987,7 @@ static void ReadyQueuesPostSeek( demux_t *p_demux )
             FlushESBuffer( pid->u.p_stream );
         }
         p_pmt->pcr.i_current = VLC_TICK_INVALID;
+        PCRSeekHistoryReset( p_pmt );
     }
 }
 
@@ -2010,15 +1996,66 @@ static int SeekToTime( demux_t *p_demux, const ts_pmt_t *p_pmt, vlc_tick_t i_see
     demux_sys_t *p_sys = p_demux->p_sys;
 
     /* Deal with common but worst binary search case */
-    if( p_pmt->pcr.i_first == i_seektime && p_sys->b_canseek )
+    if( p_sys->b_canfastseek && p_pmt->pcr.i_first == i_seektime &&
+        p_sys->b_canseek )
         return vlc_stream_Seek( p_sys->stream, 0 );
 
     uint64_t i_stream_size;
     if( vlc_stream_GetSize( p_sys->stream, &i_stream_size ) != VLC_SUCCESS )
       return VLC_EGENERIC;
 
-    if( !p_sys->b_canfastseek || i_stream_size < p_sys->i_packet_size )
+    if( i_stream_size < p_sys->i_packet_size )
         return VLC_EGENERIC;
+
+    if( !p_sys->b_canfastseek )
+    {
+        /* Use matching probed timestamp and byte bounds for one seek. */
+        const vlc_tick_t i_start = p_pmt->pcr.i_first != VLC_TICK_INVALID
+                                 ? p_pmt->pcr.i_first
+                                 : p_pmt->pcr.i_first_dts;
+        const uint64_t i_start_byte = p_pmt->pcr.i_first != VLC_TICK_INVALID
+                                    ? p_pmt->pcr.i_first_byte
+                                    : p_pmt->pcr.i_first_dts_byte;
+        if( i_start == VLC_TICK_INVALID ||
+            p_pmt->i_last_dts == VLC_TICK_INVALID ||
+            i_start_byte >= p_pmt->i_last_dts_byte )
+            return VLC_EGENERIC;
+
+        const vlc_tick_t i_last = p_pmt->i_last_dts + p_pmt->pcr.i_pcroffset;
+        if( i_last <= i_start )
+            return VLC_EGENERIC;
+
+        const uint64_t i_byte_span = p_pmt->i_last_dts_byte - i_start_byte;
+        const double f_global_rate = i_byte_span / (double)(i_last - i_start);
+        const double f_position = (i_seektime - i_start) /
+                                  (double)(i_last - i_start);
+        double f_target_byte = i_start_byte + i_byte_span * f_position;
+
+        if( p_pmt->pcr.i_current != VLC_TICK_INVALID &&
+            p_pmt->pcr.seek.i_current_byte < i_stream_size )
+        {
+            const vlc_tick_t i_delta = i_seektime - p_pmt->pcr.i_current;
+            const vlc_tick_t i_abs_delta = i_delta < 0 ? -i_delta : i_delta;
+            if( i_abs_delta <= SEEK_LOCAL_MAX_DELTA )
+            {
+                double f_rate = f_global_rate;
+                PCRSeekLocalRate( p_pmt, &f_rate );
+                f_target_byte = p_pmt->pcr.seek.i_current_byte + i_delta * f_rate;
+            }
+            else if( (i_delta > 0 && f_target_byte < p_pmt->pcr.seek.i_current_byte) ||
+                     (i_delta < 0 && f_target_byte > p_pmt->pcr.seek.i_current_byte) )
+                f_target_byte = p_pmt->pcr.seek.i_current_byte +
+                                i_delta * f_global_rate;
+        }
+
+        if( f_target_byte < 0.0 )
+            f_target_byte = 0.0;
+        else if( f_target_byte > i_stream_size - p_sys->i_packet_size )
+            f_target_byte = i_stream_size - p_sys->i_packet_size;
+
+        const uint64_t i_target_byte = f_target_byte;
+        return vlc_stream_Seek( p_sys->stream, i_target_byte );
+    }
 
     const uint64_t i_initial_pos = vlc_stream_Tell( p_sys->stream );
 
@@ -2182,10 +2219,12 @@ static int ProbeChunk( demux_t *p_demux, int i_program, bool b_end, bool *pb_fou
                         else if( b_pcrresult && p_pmt->pcr.i_first == VLC_TICK_INVALID )
                         {
                             p_pmt->pcr.i_first = FROM_SCALE(i_pcr);
+                            p_pmt->pcr.i_first_byte = vlc_stream_Tell( p_sys->stream );
                         }
                         else if( p_pmt->pcr.i_first_dts == VLC_TICK_INVALID )
                         {
                             p_pmt->pcr.i_first_dts = FROM_SCALE(i_pcr);
+                            p_pmt->pcr.i_first_dts_byte = vlc_stream_Tell( p_sys->stream );
                         }
 
                         if( i_program == 0 || i_program == p_pmt->i_number )
@@ -2329,11 +2368,14 @@ static void ProgramSetPCR( demux_t *p_demux, ts_pmt_t *p_pmt, vlc_tick_t i_pcr )
         }
     }
 
+    if( !p_sys->b_canfastseek )
+        PCRSeekHistoryUpdate( p_pmt, i_pcr, vlc_stream_Tell( p_sys->stream ) );
     p_pmt->pcr.i_current = i_pcr;
 
     if( p_pmt->pcr.i_first == VLC_TICK_INVALID )
     {
         p_pmt->pcr.i_first = i_pcr; // now seen
+        p_pmt->pcr.i_first_byte = vlc_stream_Tell( p_sys->stream );
     }
 
     if ( p_sys->i_pmt_es )
@@ -2545,6 +2587,7 @@ static void PCRFixHandle( demux_t *p_demux, ts_pmt_t *p_pmt, block_t *p_block )
     else if( p_pmt->pcr.i_first_dts == VLC_TICK_INVALID )
     {
         p_pmt->pcr.i_first_dts = p_block->i_dts;
+        p_pmt->pcr.i_first_dts_byte = vlc_stream_Tell( p_sys->stream );
     }
     else if( p_block->i_dts - p_pmt->pcr.i_first_dts > VLC_TICK_FROM_MS(500) ) /* "PCR repeat rate shall not exceed 100ms" */
     {

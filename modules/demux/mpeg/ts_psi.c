@@ -2121,15 +2121,21 @@ static void PMTCallBack( void *data, dvbpsi_pmt_t *p_dvbpsipmt )
     /* Install CAM descrambling */
     if ( p_sys->standard == TS_STANDARD_ARIB && p_sys->stream == p_demux->s && b_encryption )
     {
+        const uint64_t i_stream_pos = vlc_stream_Tell( p_demux->s );
         stream_t *wrapper = ts_stream_wrapper_New( p_demux->s );
         if( wrapper )
         {
-            p_sys->stream = vlc_stream_FilterNew( wrapper, "aribcam" );
-            if( !p_sys->stream )
+            stream_t *filter = vlc_stream_FilterNew( wrapper, "aribcam" );
+            if( !filter || (p_sys->b_canseek &&
+                            vlc_stream_Seek( filter, i_stream_pos )) )
             {
-                vlc_stream_Delete( wrapper );
-                p_sys->stream = p_demux->s;
+                if( filter )
+                    vlc_stream_Delete( filter );
+                else
+                    vlc_stream_Delete( wrapper );
             }
+            else
+                p_sys->stream = filter;
         }
     }
 
