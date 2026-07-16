@@ -200,7 +200,7 @@ typedef struct
     bool  b_active;
     int         i_mode;
 
-    es_out_es_props_t video, audio, sub;
+    es_out_es_props_t video, audio, sub, data;
 
     /* es/group to select */
     int         i_group_id;
@@ -635,6 +635,8 @@ static es_out_es_props_t * GetPropsByCat( es_out_sys_t *p_sys, int i_cat )
         return &p_sys->sub;
     case VIDEO_ES:
         return &p_sys->video;
+    case DATA_ES:
+        return &p_sys->data;
     }
     return NULL;
 }
@@ -749,6 +751,7 @@ static void EsOutDelete(es_out_t *out)
     EsOutPropsCleanup( &p_sys->video );
     EsOutPropsCleanup( &p_sys->audio );
     EsOutPropsCleanup( &p_sys->sub );
+    EsOutPropsCleanup( &p_sys->data );
 
     free( p_sys );
 }
@@ -4475,6 +4478,9 @@ input_EsOutNew(input_thread_t *p_input, input_source_t *main_source, float rate,
     EsOutPropsInit( &p_sys->sub,  false, p_input, input_type,
                     ES_OUT_ES_POLICY_AUTO,
                     "sub-track-id", "sub-track", "sub-language", "sub" );
+    EsOutPropsInit( &p_sys->data, true, p_input, input_type,
+                    ES_OUT_ES_POLICY_EXCLUSIVE,
+                    NULL, NULL, NULL, "data" );
 
     p_sys->cc_decoder = var_InheritInteger( p_input, "captions" );
 

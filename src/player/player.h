@@ -92,6 +92,7 @@ struct vlc_player_input
     vlc_player_track_vector video_track_vector;
     vlc_player_track_vector audio_track_vector;
     vlc_player_track_vector spu_track_vector;
+    vlc_player_track_vector data_track_vector;
     const struct vlc_player_track_priv *teletext_source;
 
     struct vlc_player_title_list *titles;
@@ -447,6 +448,8 @@ vlc_player_input_GetTrackVector(struct vlc_player_input *input,
             return &input->audio_track_vector;
         case SPU_ES:
             return &input->spu_track_vector;
+        case DATA_ES:
+            return &input->data_track_vector;
         default:
             return NULL;
     }

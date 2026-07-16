@@ -599,7 +599,7 @@ vlc_player_input_HandleEsEvent(struct vlc_player_input *input,
     vlc_player_track_vector *vec =
         vlc_player_input_GetTrackVector(input, ev->fmt->i_cat);
     if (!vec)
-        return; /* UNKNOWN_ES or DATA_ES not handled */
+        return; /* UNKNOWN_ES is not handled */
 
     vlc_player_t *player = input->player;
     struct vlc_player_track_priv *trackpriv;
@@ -1262,6 +1262,7 @@ vlc_player_input_New(vlc_player_t *player, input_item_t *item)
     vlc_vector_init(&input->video_track_vector);
     vlc_vector_init(&input->audio_track_vector);
     vlc_vector_init(&input->spu_track_vector);
+    vlc_vector_init(&input->data_track_vector);
     input->teletext_source = NULL;
 
     input->titles = NULL;
@@ -1350,12 +1351,14 @@ vlc_player_input_Delete(struct vlc_player_input *input)
     assert(input->video_track_vector.size == 0);
     assert(input->audio_track_vector.size == 0);
     assert(input->spu_track_vector.size == 0);
+    assert(input->data_track_vector.size == 0);
     assert(input->teletext_source == NULL);
 
     vlc_vector_destroy(&input->program_vector);
     vlc_vector_destroy(&input->video_track_vector);
     vlc_vector_destroy(&input->audio_track_vector);
     vlc_vector_destroy(&input->spu_track_vector);
+    vlc_vector_destroy(&input->data_track_vector);
 
     input_Close(input->thread);
     free(input);

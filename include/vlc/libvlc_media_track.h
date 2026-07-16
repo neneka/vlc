@@ -46,7 +46,8 @@ typedef enum libvlc_track_type_t
     libvlc_track_unknown   = -1,
     libvlc_track_audio     = 0,
     libvlc_track_video     = 1,
-    libvlc_track_text      = 2
+    libvlc_track_text      = 2,
+    libvlc_track_data      = 3
 } libvlc_track_type_t;
 
 typedef struct libvlc_audio_track_t

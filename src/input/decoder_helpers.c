@@ -63,6 +63,7 @@ int decoder_LoadModule(decoder_t *dec, bool packetizer,
         [VIDEO_ES] = "video decoder",
         [AUDIO_ES] = "audio decoder",
         [SPU_ES] = "spu decoder",
+        [DATA_ES] = "data decoder",
     };
     static const char pkt_caps[ES_CATEGORY_COUNT][19] = {
         [VIDEO_ES] = "video packetizer",

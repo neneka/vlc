@@ -89,6 +89,8 @@ libvlc_track_type_to_escat( libvlc_track_type_t i_type )
             return VIDEO_ES;
         case libvlc_track_text:
             return SPU_ES;
+        case libvlc_track_data:
+            return DATA_ES;
         case libvlc_track_unknown:
         default:
             return UNKNOWN_ES;
