@@ -1908,7 +1908,8 @@ static void PCRSeekHistoryReset( ts_pmt_t *p_pmt )
 static void PCRSeekHistoryUpdate( ts_pmt_t *p_pmt, vlc_tick_t i_time,
                                   uint64_t i_byte )
 {
-    if( p_pmt->pcr.i_current == VLC_TICK_INVALID ||
+    if( (p_pmt->pcr.i_current == VLC_TICK_INVALID &&
+          p_pmt->pcr.seek.i_current_byte == 0) ||
         i_time < p_pmt->pcr.i_current ||
         i_byte < p_pmt->pcr.seek.i_current_byte )
         PCRSeekHistoryReset( p_pmt );
@@ -1987,7 +1988,8 @@ static void ReadyQueuesPostSeek( demux_t *p_demux )
             FlushESBuffer( pid->u.p_stream );
         }
         p_pmt->pcr.i_current = VLC_TICK_INVALID;
-        PCRSeekHistoryReset( p_pmt );
+        p_pmt->pcr.seek.i_anchor_time = VLC_TICK_INVALID;
+        p_pmt->pcr.seek.i_sample_time = VLC_TICK_INVALID;
     }
 }
 
@@ -2036,16 +2038,10 @@ static int SeekToTime( demux_t *p_demux, const ts_pmt_t *p_pmt, vlc_tick_t i_see
         {
             const vlc_tick_t i_delta = i_seektime - p_pmt->pcr.i_current;
             const vlc_tick_t i_abs_delta = i_delta < 0 ? -i_delta : i_delta;
+            double f_rate = f_global_rate;
             if( i_abs_delta <= SEEK_LOCAL_MAX_DELTA )
-            {
-                double f_rate = f_global_rate;
                 PCRSeekLocalRate( p_pmt, &f_rate );
-                f_target_byte = p_pmt->pcr.seek.i_current_byte + i_delta * f_rate;
-            }
-            else if( (i_delta > 0 && f_target_byte < p_pmt->pcr.seek.i_current_byte) ||
-                     (i_delta < 0 && f_target_byte > p_pmt->pcr.seek.i_current_byte) )
-                f_target_byte = p_pmt->pcr.seek.i_current_byte +
-                                i_delta * f_global_rate;
+            f_target_byte = p_pmt->pcr.seek.i_current_byte + i_delta * f_rate;
         }
 
         if( f_target_byte < 0.0 )
