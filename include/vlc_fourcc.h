@@ -682,6 +682,7 @@
 #define VLC_CODEC_TX3G      VLC_FOURCC('t','x','3','g')
 #define VLC_CODEC_ARIB_A    VLC_FOURCC('a','r','b','a')
 #define VLC_CODEC_ARIB_C    VLC_FOURCC('a','r','b','c')
+#define VLC_CODEC_ARIB_BML  VLC_FOURCC('a','r','b','m')
 /* Blu-ray Presentation Graphics */
 #define VLC_CODEC_BD_PG     VLC_FOURCC('b','d','p','g')
 #define VLC_CODEC_BD_TEXT   VLC_FOURCC('b','d','t','x')

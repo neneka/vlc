@@ -250,6 +250,8 @@ track_type_from_cat(enum es_format_category_e cat)
             return libvlc_track_audio;
         case SPU_ES:
             return libvlc_track_text;
+        case DATA_ES:
+            return libvlc_track_data;
         default:
             return libvlc_track_unknown;
     }

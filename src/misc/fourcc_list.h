@@ -1838,6 +1838,9 @@ static const staticentry_t p_list_spu[] = {
     B(VLC_CODEC_ARIB_C, "ARIB subtitles (C-profile)"),
         A("arbc"),
 
+    B(VLC_CODEC_ARIB_BML, "ARIB BML data broadcast"),
+        A("arbm"),
+
     B(VLC_CODEC_BD_PG, "BD PGS subtitles"),
         A("bdpg"),
 
