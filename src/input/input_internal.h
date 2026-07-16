@@ -181,6 +181,7 @@ struct vlc_input_event_state
 struct vlc_input_event_times
 {
     double position;
+    double byte_position;
     vlc_tick_t time;
     vlc_tick_t normal_time;
     vlc_tick_t length;

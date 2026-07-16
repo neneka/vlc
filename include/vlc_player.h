@@ -708,6 +708,21 @@ VLC_API double
 vlc_player_GetPosition(vlc_player_t *player);
 
 /**
+ * Get the byte position of the current media
+ *
+ * Returns the current stream read offset as a fraction of the total
+ * stream size.  Unlike vlc_player_GetPosition(), this value does not
+ * go through timer interpolation and is suitable for exact save/restore
+ * of playback positions.
+ *
+ * @param player locked player instance
+ * @return a valid position in the range [0.f;1.f] or -1.f (if no media is
+ * set, if playback is not yet started or in case of error)
+ */
+VLC_API double
+vlc_player_GetBytePosition(vlc_player_t *player);
+
+/**
  * Seek the current media by position
  *
  * @note This function can be called before vlc_player_Start() in order to set

@@ -167,6 +167,7 @@ typedef struct attribute_packed
         struct
         {
             double  f_position;
+            double  f_byte_position;
             vlc_tick_t i_time;
             vlc_tick_t i_normal_time;
             vlc_tick_t i_length;
@@ -1881,12 +1882,14 @@ static int CmdInitPrivControl( ts_cmd_privcontrol_t *p_cmd, input_source_t *in, 
     case ES_OUT_PRIV_SET_TIMES:
     {
         double f_position = va_arg( args, double );
+        double f_byte_position = va_arg( args, double );
         vlc_tick_t i_time = va_arg( args, vlc_tick_t );
         vlc_tick_t i_normal_time = va_arg( args, vlc_tick_t );
         vlc_tick_t i_length = va_arg( args, vlc_tick_t );
         bool b_live = va_arg( args, int );
 
         p_cmd->u.times.f_position = f_position;
+        p_cmd->u.times.f_byte_position = f_byte_position;
         p_cmd->u.times.i_time = i_time;
         p_cmd->u.times.i_normal_time = i_normal_time;
         p_cmd->u.times.i_length = i_length;
@@ -1918,6 +1921,7 @@ static int CmdExecutePrivControl(struct es_out_timeshift *p_sys, ts_cmd_privcont
     case ES_OUT_PRIV_SET_TIMES:
         return es_out_in_PrivControl( p_sys->p_out, in, i_query,
                                       p_cmd->u.times.f_position,
+                                      p_cmd->u.times.f_byte_position,
                                       p_cmd->u.times.i_time,
                                       p_cmd->u.times.i_normal_time,
                                       p_cmd->u.times.i_length,

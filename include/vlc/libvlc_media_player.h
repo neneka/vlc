@@ -1844,6 +1844,20 @@ LIBVLC_API int libvlc_media_player_jump_time( libvlc_media_player_t *p_mi,
 LIBVLC_API double libvlc_media_player_get_position( libvlc_media_player_t *p_mi );
 
 /**
+ * Get byte-offset position as percentage between 0.0 and 1.0.
+ *
+ * Unlike libvlc_media_player_get_position(), this returns the raw stream
+ * byte offset as a fraction of the total stream size, without any timer
+ * interpolation.  It is intended for save/restore of exact playback
+ * positions.
+ *
+ * \param p_mi the Media Player
+ * \return byte position, or -1. in case of error
+ * \version LibVLC 4.0.0 and later.
+ */
+LIBVLC_API double libvlc_media_player_get_byte_position( libvlc_media_player_t *p_mi );
+
+/**
  * Set movie position as percentage between 0.0 and 1.0.
  * This has no effect if playback is not enabled.
  * This might not work depending on the underlying input format and protocol.

@@ -1462,6 +1462,14 @@ vlc_player_GetPosition(vlc_player_t *player)
     return input ? vlc_player_input_GetPos(input, false, vlc_tick_now()) : -1.f;
 }
 
+double
+vlc_player_GetBytePosition(vlc_player_t *player)
+{
+    struct vlc_player_input *input = vlc_player_get_input_locked(player);
+
+    return input ? input->byte_position : -1.f;
+}
+
 void
 vlc_player_DisplayPosition(vlc_player_t *player)
 {

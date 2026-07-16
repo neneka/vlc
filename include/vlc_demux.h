@@ -283,7 +283,18 @@ enum demux_query_e
      * work in future VLC versions, nor with all demux filters
      */
     DEMUX_FILTER_ENABLE,
-    DEMUX_FILTER_DISABLE
+    DEMUX_FILTER_DISABLE,
+
+    /**
+     * Byte position double between 0.0 and 1.0
+     *
+     * Returns the current byte offset as a fraction of the total stream
+     * size.  Unlike DEMUX_GET_POSITION, this is a direct byte ratio and
+     * does not involve timestamp interpolation.  Useful for save/restore
+     * of exact stream positions across sessions.
+     *
+     * arg1= double *       res= can fail */
+    DEMUX_GET_BYTE_POSITION,
 };
 
 /*************************************************************************
@@ -399,6 +410,11 @@ VLC_USED static inline int vlc_demux_GetTitleInfo(demux_t *demux, input_title_t 
 VLC_USED static inline int vlc_demux_GetPosition(demux_t *demux, double *position)
 {
     return demux_Control(demux, DEMUX_GET_POSITION, position);
+}
+
+VLC_USED static inline int vlc_demux_GetBytePosition(demux_t *demux, double *position)
+{
+    return demux_Control(demux, DEMUX_GET_BYTE_POSITION, position);
 }
 
 VLC_USED static inline int vlc_demux_GetLength(demux_t *demux, vlc_tick_t *length)

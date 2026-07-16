@@ -1558,6 +1558,17 @@ double libvlc_media_player_get_position( libvlc_media_player_t *p_mi )
     return f_position;
 }
 
+double libvlc_media_player_get_byte_position( libvlc_media_player_t *p_mi )
+{
+    vlc_player_t *player = p_mi->player;
+    vlc_player_Lock(player);
+
+    double f_position = vlc_player_GetBytePosition(player);
+
+    vlc_player_Unlock(player);
+    return f_position;
+}
+
 int
 libvlc_media_player_set_abloop_time( libvlc_media_player_t *p_mi,
                                      libvlc_time_t a_time, libvlc_time_t b_time )

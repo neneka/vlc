@@ -362,6 +362,18 @@ int demux_vaControl( demux_t *demux, int query, va_list args )
                 return VLC_SUCCESS;
             }
             return VLC_EGENERIC;
+        case DEMUX_GET_BYTE_POSITION:
+        {
+            uint64_t size;
+            if (vlc_stream_GetSize(demux->s, &size) == VLC_SUCCESS
+             && size > 0)
+            {
+                uint64_t offset = vlc_stream_Tell(demux->s);
+                *va_arg(args, double *) = (double)offset / (double)size;
+                return VLC_SUCCESS;
+            }
+            return VLC_EGENERIC;
+        }
         case DEMUX_GET_LENGTH:
             if (demux->ops->demux.get_length != NULL) {
                 *va_arg(args, vlc_tick_t *) = demux->ops->demux.get_length(demux);
@@ -606,6 +618,18 @@ int demux_vaControlHelper( stream_t *s,
                 return VLC_SUCCESS;
             }
             return VLC_EGENERIC;
+
+        case DEMUX_GET_BYTE_POSITION:
+        {
+            uint64_t size;
+            if (vlc_stream_GetSize(s, &size) == VLC_SUCCESS && size > 0)
+            {
+                uint64_t offset = vlc_stream_Tell(s);
+                *va_arg(args, double *) = (double)offset / (double)size;
+                return VLC_SUCCESS;
+            }
+            return VLC_EGENERIC;
+        }
         case DEMUX_GET_NORMAL_TIME:
             return VLC_EGENERIC;
 

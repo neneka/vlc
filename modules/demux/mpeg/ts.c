@@ -951,6 +951,16 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
         }
         break;
 
+    case DEMUX_GET_BYTE_POSITION:
+        pf = va_arg( args, double * );
+        if( vlc_stream_GetSize( p_sys->stream, &u64 ) == VLC_SUCCESS )
+        {
+            uint64_t offset = vlc_stream_Tell( p_sys->stream );
+            *pf = (double)offset / (double)u64;
+            return VLC_SUCCESS;
+        }
+        break;
+
     case DEMUX_SET_POSITION:
         f = va_arg( args, double );
         b_bool = (bool) va_arg( args, int ); /* precise */

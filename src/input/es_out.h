@@ -281,10 +281,12 @@ static inline int es_out_SetFramePrevious(struct vlc_input_es_out *out)
 
 static inline void
 es_out_SetTimes(struct vlc_input_es_out *out, double f_position,
+                double f_byte_position,
                 vlc_tick_t i_time, vlc_tick_t i_normal_time,
                 vlc_tick_t i_length, bool b_live  )
 {
-    int i_ret = es_out_PrivControl(out, ES_OUT_PRIV_SET_TIMES, f_position, i_time,
+    int i_ret = es_out_PrivControl(out, ES_OUT_PRIV_SET_TIMES, f_position,
+                                   f_byte_position, i_time,
                                    i_normal_time, i_length, b_live);
     assert( !i_ret );
 }

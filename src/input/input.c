@@ -582,6 +582,7 @@ static void InputSourceStatistics(input_source_t *source, input_item_t *item,
                                   struct vlc_input_es_out *out )
 {
     double f_position = 0.0;
+    double f_byte_position = 0.0;
     vlc_tick_t i_time;
     vlc_tick_t i_length;
     vlc_tick_t i_normal_time;
@@ -590,6 +591,9 @@ static void InputSourceStatistics(input_source_t *source, input_item_t *item,
     if( demux_Control( source->p_demux,
                        DEMUX_GET_POSITION, &f_position ) )
         f_position = 0.0;
+
+    demux_Control( source->p_demux,
+                   DEMUX_GET_BYTE_POSITION, &f_byte_position );
 
     if( demux_Control( source->p_demux, DEMUX_GET_TIME, &i_time ) )
         i_time = VLC_TICK_INVALID;
@@ -601,8 +605,8 @@ static void InputSourceStatistics(input_source_t *source, input_item_t *item,
     if (demux_Control( source->p_demux, DEMUX_GET_NORMAL_TIME, &i_normal_time ) != VLC_SUCCESS)
         i_normal_time = VLC_TICK_INVALID;
 
-    es_out_SetTimes( out, f_position, i_time, i_normal_time, i_length,
-                     live );
+    es_out_SetTimes( out, f_position, f_byte_position, i_time, i_normal_time,
+                     i_length, live );
 }
 
 /**

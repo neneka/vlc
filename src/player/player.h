@@ -72,6 +72,7 @@ struct vlc_player_input
     bool live;
 
     double position;
+    double byte_position;
     vlc_tick_t time;
     vlc_tick_t normal_time;
 

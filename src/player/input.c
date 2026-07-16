@@ -1039,6 +1039,7 @@ input_thread_Events(input_thread_t *input_thread,
             {
                 input->time = event->times.time;
                 input->position = event->times.position;
+                input->byte_position = event->times.byte_position;
                 system_date = vlc_tick_now();
                 changed = true;
                 vlc_player_SendEvent(player, on_position_changed,
@@ -1248,6 +1249,7 @@ vlc_player_input_New(vlc_player_t *player, input_item_t *item)
     input->normal_time = VLC_TICK_0;
     input->pause_date = VLC_TICK_INVALID;
     input->position = 0.f;
+    input->byte_position = 0.f;
 
     input->recording = false;
 
