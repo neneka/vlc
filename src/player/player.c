@@ -485,7 +485,7 @@ vlc_player_SelectEsIdList(vlc_player_t *player,
         [VIDEO_ES] = UINT_MAX,
         [AUDIO_ES] = 1,
         [SPU_ES] = 2,
-        [DATA_ES] = 0,
+        [DATA_ES] = 1,
     };
 
     struct vlc_player_input *input = vlc_player_get_input_locked(player);

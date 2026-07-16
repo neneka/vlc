@@ -109,6 +109,9 @@ libvlc_media_trackpriv_from_es( libvlc_media_trackpriv_t *trackpriv,
         track->u.subtitle->psz_encoding = es->subs.psz_encoding != NULL ?
                                         strdup(es->subs.psz_encoding) : NULL;
         break;
+    case DATA_ES:
+        track->i_type = libvlc_track_data;
+        break;
     }
 }
 
@@ -140,6 +143,8 @@ static void libvlc_media_track_clean( libvlc_media_track_t *track )
         break;
     case libvlc_track_text:
         free( track->u.subtitle->psz_encoding );
+        break;
+    case libvlc_track_data:
         break;
     case libvlc_track_unknown:
     default:
