@@ -53,4 +53,9 @@ bool ts_arib_inject_png_palette( const uint8_t *p_in, size_t i_in,
 
 char * ts_arib_Decode( const uint8_t *p_in, size_t i_in );
 
+void BML_Section_Callback( demux_t *p_demux,
+                           const uint8_t *p_sectiondata, size_t i_sectiondata,
+                           const uint8_t *p_payloaddata, size_t i_payloaddata,
+                           void *p_pes_cb_data );
+
 #endif
