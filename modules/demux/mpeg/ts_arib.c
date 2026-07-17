@@ -22,6 +22,7 @@
 
 #include <vlc_common.h>
 #include <vlc_demux.h>
+#include <vlc_variables.h>
 
 #include "timestamps.h"
 #include "ts_pid.h"
@@ -655,4 +656,32 @@ char * ts_arib_Decode( const uint8_t *p_in, size_t i_in )
         return NULL;
 
     return stream.ptr;
+}
+
+void BML_Section_Callback( demux_t *p_demux,
+                           const uint8_t *p_sectiondata, size_t i_sectiondata,
+                           const uint8_t *p_payloaddata, size_t i_payloaddata,
+                           void *p_pes_cb_data )
+{
+    VLC_UNUSED(p_payloaddata); VLC_UNUSED(i_payloaddata);
+    VLC_UNUSED(p_pes_cb_data);
+
+    msg_Info( p_demux, "BML: section callback called, size %zu", i_sectiondata );
+
+    vlc_object_t *obj = VLC_OBJECT(p_demux);
+    void (*cb)(const uint8_t*, size_t, void*) = NULL;
+    void *opaque = NULL;
+
+    while (obj != NULL) {
+        if (var_Type(obj, "bml-data-cb") != 0) {
+            cb = (void(*)(const uint8_t*, size_t, void*))var_GetAddress(obj, "bml-data-cb");
+            opaque = var_GetAddress(obj, "bml-data-opaque");
+            break;
+        }
+        obj = vlc_object_parent(obj);
+    }
+
+    if (cb) {
+        cb(p_sectiondata, i_sectiondata, opaque);
+    }
 }

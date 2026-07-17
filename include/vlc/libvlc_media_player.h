@@ -894,6 +894,15 @@ typedef void (*libvlc_video_display_cb)(void *opaque, void *picture);
 typedef void (*libvlc_video_arib_text_cb)(const char *text, void *opaque);
 
 /**
+ * Callback prototype to report ARIB BML stream data.
+ *
+ * \param data pointer to the TS section data buffer
+ * \param size size of the data buffer in bytes
+ * \param opaque user data
+ */
+typedef void (*libvlc_bml_data_cb)(const uint8_t *data, size_t size, void *opaque);
+
+/**
  * Callback prototype to configure picture buffers format.
  * This callback gets the format of the video as output by the video decoder
  * and the chain of video filters (if any). It can opt to change any parameter
@@ -992,6 +1001,18 @@ LIBVLC_API
 void libvlc_video_set_arib_text_callbacks( libvlc_media_player_t *mp,
                                            libvlc_video_arib_text_cb cb,
                                            void *opaque );
+
+/**
+ * Set callbacks to receive ARIB BML stream data.
+ *
+ * \param mp the media player
+ * \param cb callback to report BML data (or NULL)
+ * \param opaque private pointer for the callback
+ */
+LIBVLC_API
+void libvlc_video_set_bml_callbacks( libvlc_media_player_t *mp,
+                                     libvlc_bml_data_cb cb,
+                                     void *opaque );
 
 
 /**
