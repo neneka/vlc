@@ -188,6 +188,11 @@ bool ts_pes_Gather( ts_pes_parse_callback *cb,
         /* Flag unfinished unit as corrupted */
         if ( p_pes->gather.i_gathered )
             p_pes->gather.i_block_flags |= BLOCK_FLAG_CORRUPTED;
+        /* If the complete previous unit was lost, there is no corrupted
+         * block to carry the loss downstream. Mark the next valid unit as
+         * discontinuous instead. */
+        else if( p_pes->p_es )
+            p_pes->p_es->i_next_block_flags |= BLOCK_FLAG_DISCONTINUITY;
         p_pkt->i_flags &= ~BLOCK_FLAG_PRIVATE_PACKET_LOSS;
     }
 

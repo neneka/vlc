@@ -51,8 +51,10 @@ static void Parse(vlc_object_t *obj, void *priv, block_t *data,
     output = NULL;\
     block_ChainRelease(pes.gather.p_data);\
     memset(&pes, 0, sizeof(pes));\
+    memset(&es, 0, sizeof(es));\
     pes.transport = TS_TRANSPORT_PES;\
     pes.gather.pp_last = &pes.gather.p_data;\
+    pes.p_es = &es;\
     } while(0)
 
 #define ASSERT(a) do {\
@@ -89,8 +91,11 @@ int main(void)
 
     ts_stream_t pes;
     memset(&pes, 0, sizeof(pes));
+    ts_es_t es;
+    memset(&es, 0, sizeof(es));
     pes.transport = TS_TRANSPORT_PES;
     pes.gather.pp_last = &pes.gather.p_data;
+    pes.p_es = &es;
 
     /* filler packet */
     const uint8_t dummy0[] = {
@@ -336,6 +341,16 @@ int main(void)
     ASSERT(outputcount == 1);
     ASSERT(outputsize == sizeof(aligned1));
     //ASSERT(output->i_flags == BLOCK_FLAG_CORRUPTED); /* First might be corrupted but we don't really know */
+    RESET;
+
+    /* A packet loss with no active PES means a complete unit was lost.
+     * Preserve that information for the next valid output unit. */
+    PKT_FROM(aligned1);
+    pkt->i_flags |= BLOCK_FLAG_PRIVATE_PACKET_LOSS;
+    ASSERT(ts_pes_Gather(&cb, &pes, pkt, true, true, 0));
+    ASSERT(output);
+    ASSERT(output->i_flags == 0);
+    ASSERT(es.i_next_block_flags == BLOCK_FLAG_DISCONTINUITY);
     RESET;
 
     return 0;

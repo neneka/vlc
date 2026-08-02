@@ -142,6 +142,8 @@ struct decoder_audio
     audio_output_t *aout;
     vlc_aout_stream *stream;
     bool drained;
+    /* Forward an input discontinuity to the first decoded output block. */
+    bool discontinuity_pending;
 };
 
 struct decoder_spu
@@ -1680,6 +1682,12 @@ static int ModuleThread_PlayAudio( vlc_input_decoder_t *p_owner, vlc_frame_t *p_
         return ret;
     }
 
+    if( p_owner->audio.discontinuity_pending )
+    {
+        p_audio->i_flags |= BLOCK_FLAG_DISCONTINUITY;
+        p_owner->audio.discontinuity_pending = false;
+    }
+
     int status = vlc_aout_stream_Play( p_astream, p_audio );
     if( status == AOUT_DEC_CHANGED )
     {
@@ -1784,6 +1792,10 @@ static void DecoderThread_DecodeBlock( vlc_input_decoder_t *p_owner, vlc_frame_t
 {
     decoder_t *p_dec = &p_owner->dec;
     struct vlc_tracer *tracer = vlc_object_get_tracer( &p_dec->obj );
+
+    if( p_owner->cat == AUDIO_ES && frame != NULL &&
+        (frame->i_flags & BLOCK_FLAG_DISCONTINUITY) )
+        p_owner->audio.discontinuity_pending = true;
 
     vlc_fifo_Unlock(p_owner->p_fifo);
 
@@ -1931,6 +1943,9 @@ static void DecoderThread_Flush( vlc_input_decoder_t *p_owner )
 {
     decoder_t *p_dec = &p_owner->dec;
     decoder_t *p_packetizer = p_owner->p_packetizer;
+
+    if( p_owner->cat == AUDIO_ES )
+        p_owner->audio.discontinuity_pending = false;
 
     if( p_packetizer != NULL && p_packetizer->pf_flush != NULL )
         p_packetizer->pf_flush( p_packetizer );
@@ -2266,6 +2281,7 @@ CreateDecoder( vlc_object_t *p_parent, const struct vlc_input_decoder_cfg *cfg )
             p_owner->audio.aout = NULL;
             p_owner->audio.stream = NULL;
             p_owner->audio.drained = false;
+            p_owner->audio.discontinuity_pending = false;
             p_dec->cbs = &dec_audio_cbs;
             break;
         case SPU_ES:
