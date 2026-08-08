@@ -146,7 +146,7 @@ void vout_snapshot_Set(vout_snapshot_t *snap,
         if (!dup)
             break;
 
-        video_format_CopyCrop( &dup->format, fmt );
+        video_format_CopyCropAr( &dup->format, fmt );
 
         vlc_picture_chain_Append( &snap->pics, dup );
         snap->request_count--;
@@ -251,4 +251,3 @@ error:
     msg_Err(p_vout, "could not save snapshot");
     return VLC_EGENERIC;
 }
-
