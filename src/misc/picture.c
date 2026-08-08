@@ -616,9 +616,11 @@ int picture_Export( vlc_object_t *p_obj,
     }
     else
     {
-        fmt_out.i_width  = ( i_override_width < 0 ) ?
+        const bool use_original_size = i_override_width == 0 &&
+                                       i_override_height == 0;
+        fmt_out.i_width  = ( i_override_width < 0 || use_original_size ) ?
                            i_original_width : (unsigned)i_override_width;
-        fmt_out.i_height = ( i_override_height < 0 ) ?
+        fmt_out.i_height = ( i_override_height < 0 || use_original_size ) ?
                            i_original_height : (unsigned)i_override_height;
     }
 
