@@ -285,6 +285,14 @@ input_thread_t * input_Create( vlc_object_t *p_parent, input_item_t *p_item,
     priv->prev_frame.enabled = priv->prev_frame.end = false;
     priv->prev_frame.last_pts = VLC_TICK_INVALID;
     priv->next_frame_need_data = false;
+    priv->explicit_frame_next_pending = 0;
+    priv->b_seek_preroll = false;
+    priv->b_seek_preroll_done = false;
+    priv->b_seek_preroll_initial = false;
+    priv->b_seek_preroll_source_resumed = false;
+    priv->seek_preroll_demux_count = 0;
+    priv->seek_preroll_burst_remaining = 0;
+    priv->seek_preroll_deadline = VLC_TICK_INVALID;
 
     priv->viewpoint_changed = false;
     /* Fetch the viewpoint from the mediaplayer or the playlist if any */
@@ -491,6 +499,112 @@ static void ResetPosition( input_thread_t *p_input )
         input_SetPosition( p_input, 0.0f, false );
 }
 
+/* Bound paused preroll independently of the demux format.  Byte-level input
+ * buffering is limited separately by the access prefetch configuration. */
+#define SEEK_PREROLL_MAX_DEMUX_CALLS 256
+#define SEEK_PREROLL_DEMUX_CALL_BURST 64
+#define SEEK_PREROLL_TIMEOUT VLC_TICK_FROM_SEC(2)
+
+static bool SeekPrerollSetSourcePaused( input_thread_t *p_input, bool paused )
+{
+    input_thread_private_t *priv = input_priv(p_input);
+
+    if( priv->b_seek_preroll_source_resumed == !paused )
+        return true;
+
+    if( demux_Control( priv->master->p_demux,
+                       DEMUX_SET_PAUSE_STATE, paused ) )
+    {
+        msg_Warn( p_input, "cannot %s source for paused seek preroll",
+                  paused ? "pause" : "resume" );
+        return false;
+    }
+
+    priv->b_seek_preroll_source_resumed = !paused;
+    return true;
+}
+
+static bool SeekPrerollCanDemux( const input_thread_private_t *priv )
+{
+    return priv->b_seek_preroll &&
+           priv->seek_preroll_burst_remaining > 0 &&
+           ( priv->b_seek_preroll_initial || priv->next_frame_need_data );
+}
+
+static void SeekPrerollComplete( input_thread_t *p_input,
+                                 bool cancel_frame_next )
+{
+    input_thread_private_t *priv = input_priv(p_input);
+
+    if( !priv->b_seek_preroll )
+        return;
+
+    SeekPrerollSetSourcePaused( p_input, true );
+    es_out_SetPausedSeekPreroll( priv->p_es_out, false );
+
+    priv->b_seek_preroll = false;
+    priv->b_seek_preroll_done = true;
+    priv->b_seek_preroll_initial = false;
+    priv->next_frame_need_data = false;
+    if( cancel_frame_next )
+        priv->explicit_frame_next_pending = 0;
+    priv->seek_preroll_burst_remaining = 0;
+    priv->seek_preroll_deadline = VLC_TICK_INVALID;
+}
+
+static void SeekPrerollReset( input_thread_t *p_input )
+{
+    input_thread_private_t *priv = input_priv(p_input);
+
+    SeekPrerollSetSourcePaused( p_input, true );
+    if( priv->b_seek_preroll )
+        es_out_SetPausedSeekPreroll( priv->p_es_out, false );
+
+    priv->b_seek_preroll = false;
+    priv->b_seek_preroll_done = false;
+    priv->b_seek_preroll_initial = false;
+    priv->explicit_frame_next_pending = 0;
+    priv->seek_preroll_demux_count = 0;
+    priv->seek_preroll_burst_remaining = 0;
+    priv->seek_preroll_deadline = VLC_TICK_INVALID;
+}
+
+static void SeekPrerollStart( input_thread_t *p_input )
+{
+    input_thread_private_t *priv = input_priv(p_input);
+
+    if( priv->i_state != PAUSE_S || !priv->master->b_can_pause )
+        return;
+
+    priv->b_seek_preroll = true;
+    priv->b_seek_preroll_done = false;
+    priv->b_seek_preroll_initial = true;
+    priv->seek_preroll_demux_count = 0;
+    priv->seek_preroll_burst_remaining = 1;
+    priv->seek_preroll_deadline = vlc_tick_now() + SEEK_PREROLL_TIMEOUT;
+    es_out_SetPausedSeekPreroll( priv->p_es_out, true );
+}
+
+static bool SeekPrerollLimitReached( input_thread_t *p_input )
+{
+    input_thread_private_t *priv = input_priv(p_input);
+
+    if( !priv->b_seek_preroll )
+        return false;
+
+    if( priv->seek_preroll_demux_count < SEEK_PREROLL_MAX_DEMUX_CALLS &&
+        vlc_tick_now() < priv->seek_preroll_deadline )
+        return false;
+
+    msg_Warn( p_input, "paused seek preroll %s after %u demux calls",
+              priv->seek_preroll_demux_count >=
+                  SEEK_PREROLL_MAX_DEMUX_CALLS ? "reached demux call limit" :
+                                                "timed out",
+              priv->seek_preroll_demux_count );
+    SeekPrerollComplete( p_input, true );
+    return true;
+}
+
 /*****************************************************************************
  * Main loop: Fill buffers from access, and demux
  *****************************************************************************/
@@ -661,15 +775,33 @@ static void MainLoop( input_thread_t *p_input, bool b_interactive )
     while( !input_Stopped( p_input ) && input_priv(p_input)->i_state != ERROR_S )
     {
         vlc_tick_t i_wakeup = -1;
-        bool b_paused = input_priv(p_input)->i_state == PAUSE_S;
+        input_thread_private_t *priv = input_priv(p_input);
+        SeekPrerollLimitReached( p_input );
+        bool b_paused = priv->i_state == PAUSE_S;
         /* FIXME if input_priv(p_input)->i_state == PAUSE_S the access/access_demux
          * is paused -> this may cause problem with some of them
          * The same problem can be seen when seeking while paused */
         if( b_paused )
         {
-            b_paused = !es_out_GetBuffering( input_priv(p_input)->p_es_out )
-                    || input_priv(p_input)->master->b_eof;
-            if( b_paused && input_priv(p_input)->next_frame_need_data )
+            if( priv->b_seek_preroll )
+            {
+                if( SeekPrerollCanDemux( priv ) )
+                {
+                    if( SeekPrerollSetSourcePaused( p_input, false ) )
+                        b_paused = false;
+                    else
+                        SeekPrerollComplete( p_input, true );
+                }
+            }
+            else if( !priv->b_seek_preroll_done )
+            {
+                b_paused = !es_out_GetBuffering( priv->p_es_out )
+                        || priv->master->b_eof;
+                if( b_paused && priv->next_frame_need_data )
+                    b_paused = false;
+            }
+            else if( priv->explicit_frame_next_pending &&
+                     priv->next_frame_need_data )
                 b_paused = false;
         }
 
@@ -680,6 +812,17 @@ static void MainLoop( input_thread_t *p_input, bool b_interactive )
                 bool b_force_update = false;
 
                 MainLoopDemux( p_input, &b_force_update );
+
+                if( priv->b_seek_preroll && priv->i_state == PAUSE_S )
+                {
+                    priv->b_seek_preroll_initial = false;
+                    priv->seek_preroll_demux_count++;
+                    if( priv->seek_preroll_burst_remaining > 0 )
+                        priv->seek_preroll_burst_remaining--;
+                    if( !SeekPrerollCanDemux( priv ) )
+                        SeekPrerollSetSourcePaused( p_input, true );
+                    SeekPrerollLimitReached( p_input );
+                }
 
                 if( b_can_demux )
                     i_wakeup = es_out_GetWakeup( input_priv(p_input)->p_es_out );
@@ -722,6 +865,10 @@ static void MainLoop( input_thread_t *p_input, bool b_interactive )
             }
         }
 
+        if( priv->b_seek_preroll &&
+            ( i_wakeup < 0 || i_wakeup > priv->seek_preroll_deadline ) )
+            i_wakeup = priv->seek_preroll_deadline;
+
         /* Handle control */
         for( ;; )
         {
@@ -761,12 +908,22 @@ static void MainLoop( input_thread_t *p_input, bool b_interactive )
             }
 
             /* Update the wakeup time */
-            if( input_priv(p_input)->next_frame_need_data )
+            input_thread_private_t *priv = input_priv(p_input);
+            if( SeekPrerollCanDemux( priv ) ||
+                ( !priv->b_seek_preroll &&
+                  ( !priv->b_seek_preroll_done ||
+                    priv->explicit_frame_next_pending ) &&
+                  priv->next_frame_need_data ) )
                 i_wakeup = 0;
             else if( i_wakeup != 0 )
             {
-                i_wakeup = es_out_GetWakeup( input_priv(p_input)->p_es_out );
+                i_wakeup = es_out_GetWakeup( priv->p_es_out );
             }
+
+            if( priv->b_seek_preroll &&
+                ( i_wakeup < 0 ||
+                  i_wakeup > priv->seek_preroll_deadline ) )
+                i_wakeup = priv->seek_preroll_deadline;
         }
     }
 }
@@ -1506,7 +1663,8 @@ static size_t ControlGetReducedIndexLocked( input_thread_t *p_input,
              i_ct == INPUT_CONTROL_SET_PROGRAM ||
              i_ct == INPUT_CONTROL_SET_TITLE ||
              i_ct == INPUT_CONTROL_SET_SEEKPOINT ||
-             i_ct == INPUT_CONTROL_SET_VIEWPOINT )
+             i_ct == INPUT_CONTROL_SET_VIEWPOINT ||
+             i_ct == INPUT_CONTROL_NEED_DATA_FRAME_NEXT )
         {
             return sys->i_control - 1;
         }
@@ -1783,6 +1941,8 @@ static void ControlPause(input_thread_t *p_input, vlc_tick_t i_control_date,
 
 static void ControlUnpause( input_thread_t *p_input, vlc_tick_t i_control_date )
 {
+    SeekPrerollReset( p_input );
+
     if( input_priv(p_input)->master->b_can_pause )
     {
         demux_t *p_demux = input_priv(p_input)->master->p_demux;
@@ -2105,6 +2265,8 @@ static bool Control( input_thread_t *p_input,
                 break;
             }
 
+            SeekPrerollReset( p_input );
+
             /* Reset the decoders states and clock sync (before calling the demuxer */
             es_out_Control(&priv->p_es_out->out, ES_OUT_RESET_PCR);
             ResetFramePrevious( p_input );
@@ -2117,7 +2279,10 @@ static bool Control( input_thread_t *p_input,
                 msg_Err( p_input, "INPUT_CONTROL_SET_POSITION "
                          "%2.1f%% failed", param.pos.f_val * 100.f );
             else
+            {
+                SeekPrerollStart( p_input );
                 b_force_update = true;
+            }
             break;
         }
 
@@ -2128,6 +2293,8 @@ static bool Control( input_thread_t *p_input,
                 msg_Err( p_input, "INPUT_CONTROL_SET_TIME ignored while recording" );
                 break;
             }
+
+            SeekPrerollReset( p_input );
 
             /* Reset the decoders states and clock sync (before calling the demuxer */
             es_out_Control(&priv->p_es_out->out, ES_OUT_RESET_PCR);
@@ -2141,7 +2308,10 @@ static bool Control( input_thread_t *p_input,
                 msg_Warn( p_input, "INPUT_CONTROL_SET_TIME @%"PRId64
                           " failed or not possible", param.time.i_val );
             else
+            {
+                SeekPrerollStart( p_input );
                 b_force_update = true;
+            }
             break;
         }
 
@@ -2474,6 +2644,8 @@ static bool Control( input_thread_t *p_input,
             }
             if( priv->i_state == PAUSE_S )
             {
+                if( priv->explicit_frame_next_pending < UINT_MAX )
+                    priv->explicit_frame_next_pending++;
                 ResetFramePrevious( p_input );
                 es_out_SetFrameNext( priv->p_es_out );
             }
@@ -2537,8 +2709,51 @@ static bool Control( input_thread_t *p_input,
             b_force_update = true;
             break;
         case INPUT_CONTROL_NEED_DATA_FRAME_NEXT:
-            priv->next_frame_need_data = param.val.b_bool;
+            if( priv->b_seek_preroll )
+            {
+                priv->next_frame_need_data = param.val.b_bool;
+                if( param.val.b_bool )
+                    priv->seek_preroll_burst_remaining =
+                        SEEK_PREROLL_DEMUX_CALL_BURST;
+                else
+                {
+                    priv->seek_preroll_burst_remaining = 0;
+                    SeekPrerollSetSourcePaused( p_input, true );
+                }
+            }
+            else if( priv->b_seek_preroll_done && priv->i_state == PAUSE_S )
+                priv->next_frame_need_data =
+                    priv->explicit_frame_next_pending && param.val.b_bool;
+            else
+                priv->next_frame_need_data = param.val.b_bool;
             break;
+        case INPUT_CONTROL_FRAME_NEXT_DONE:
+        {
+            const bool had_explicit_request =
+                priv->explicit_frame_next_pending > 0;
+            if( had_explicit_request )
+                priv->explicit_frame_next_pending--;
+
+            if( priv->b_seek_preroll && had_explicit_request &&
+                param.val.i_int == 0 )
+            {
+                msg_Dbg( p_input, "paused seek preroll produced a frame "
+                         "after %u demux calls",
+                         priv->seek_preroll_demux_count );
+                SeekPrerollComplete( p_input, false );
+            }
+            else if( priv->b_seek_preroll && had_explicit_request &&
+                     priv->explicit_frame_next_pending == 0 )
+            {
+                msg_Dbg( p_input, "paused seek preroll frame request failed: "
+                         "%d", (int)param.val.i_int );
+                SeekPrerollComplete( p_input, false );
+            }
+            if( priv->b_seek_preroll_done &&
+                priv->explicit_frame_next_pending == 0 )
+                priv->next_frame_need_data = false;
+            break;
+        }
         case INPUT_CONTROL_SEEK_FRAME_PREVIOUS:
             SeekFramePrevious(p_input, param.frame_previous_seek.pts,
                               param.frame_previous_seek.frame_rate,

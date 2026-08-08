@@ -91,6 +91,9 @@ enum es_out_query_private_e
     /* Set previous frame */
     ES_OUT_PRIV_SET_FRAME_PREVIOUS,                     /*                          res=can fail */
 
+    /* Keep PCR updates in buffering mode while a paused seek is prerolling. */
+    ES_OUT_PRIV_SET_PAUSED_SEEK_PREROLL,                /* arg1=bool             res=cannot fail */
+
     /* Set position/time/length */
     ES_OUT_PRIV_SET_TIMES,                          /* arg1=double f_position arg2=vlc_tick_t i_time arg3=vlc_tick_t i_normal_time arg4=vlc_tick_t i_length arg5 int b_live res=cannot fail */
 
@@ -277,6 +280,14 @@ es_out_SetFrameNext(struct vlc_input_es_out *out )
 static inline int es_out_SetFramePrevious(struct vlc_input_es_out *out)
 {
     return es_out_PrivControl(out, ES_OUT_PRIV_SET_FRAME_PREVIOUS);
+}
+
+static inline void
+es_out_SetPausedSeekPreroll(struct vlc_input_es_out *out, bool enabled)
+{
+    int ret = es_out_PrivControl(out, ES_OUT_PRIV_SET_PAUSED_SEEK_PREROLL,
+                                 enabled);
+    assert(ret == VLC_SUCCESS);
 }
 
 static inline void

@@ -43,6 +43,39 @@ test_seeks(struct ctx *ctx)
 
         assert(VEC_LAST(vec).time >= last_time + jump_time);
         assert_position(ctx, &VEC_LAST(vec));
+
+        vlc_player_Pause(player);
+        wait_state(ctx, VLC_PLAYER_STATE_PAUSED);
+
+        const size_t report_count = vec->size;
+        const vlc_tick_t paused_seek_time = VLC_TICK_FROM_SEC(8);
+        vlc_player_SetTime(player, paused_seek_time);
+
+        while (vec->size == report_count ||
+               VEC_LAST(vec).time < paused_seek_time)
+            vlc_player_CondWait(player, &ctx->wait);
+
+        assert_position(ctx, &VEC_LAST(vec));
+        assert_state(ctx, VLC_PLAYER_STATE_PAUSED);
+
+        /* A paused seek may preroll a frame, but must not resume playback. */
+        vlc_player_Unlock(player);
+        vlc_tick_sleep(VLC_TICK_FROM_MS(100));
+        vlc_player_Lock(player);
+        assert_state(ctx, VLC_PLAYER_STATE_PAUSED);
+
+        /* Stale seek preroll requests must not prevent an explicit next-frame
+         * burst after the seek has completed. */
+        vec_on_next_frame_status *status_vec =
+            &ctx->report.on_next_frame_status;
+        const size_t status_count = status_vec->size;
+        vlc_player_NextVideoFrame(player);
+        vlc_player_NextVideoFrame(player);
+        while (status_vec->size < status_count + 2)
+            vlc_player_CondWait(player, &ctx->wait);
+        assert(status_vec->data[status_count] == 0);
+        assert(status_vec->data[status_count + 1] == 0);
+        assert_state(ctx, VLC_PLAYER_STATE_PAUSED);
     }
 
     vlc_player_SetPosition(player, 2.0f);

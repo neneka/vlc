@@ -569,6 +569,17 @@ typedef struct input_thread_private_t
     } prev_frame;
 
     bool next_frame_need_data;
+    unsigned explicit_frame_next_pending;
+
+    /* A paused seek resumes the source only for decoder-requested demux
+     * passes.  Completion is reported when the first frame is produced. */
+    bool b_seek_preroll;
+    bool b_seek_preroll_done;
+    bool b_seek_preroll_initial;
+    bool b_seek_preroll_source_resumed;
+    unsigned seek_preroll_demux_count;
+    unsigned seek_preroll_burst_remaining;
+    vlc_tick_t seek_preroll_deadline;
 } input_thread_private_t;
 
 static inline input_thread_private_t *input_priv(input_thread_t *input)
@@ -638,6 +649,8 @@ enum input_control_e
 
     INPUT_CONTROL_SET_VBI_PAGE,
     INPUT_CONTROL_SET_VBI_TRANSPARENCY,
+
+    INPUT_CONTROL_FRAME_NEXT_DONE,
 };
 
 /* Internal helpers */

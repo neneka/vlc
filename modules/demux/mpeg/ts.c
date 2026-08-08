@@ -968,7 +968,32 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
         if(!p_sys->b_canseek)
             break;
 
-        if( p_sys->b_canfastseek && !p_sys->b_ignore_time_for_positions &&
+        if( !p_sys->b_canfastseek && p_pmt )
+        {
+            const vlc_tick_t i_start = p_pmt->pcr.i_first != VLC_TICK_INVALID
+                                     ? p_pmt->pcr.i_first
+                                     : p_pmt->pcr.i_first_dts;
+
+            /* Convert a position to a time estimate, then use the
+             * non-fastseek byte estimator.  SeekToTime() does not read in
+             * this mode; it performs exactly one stream seek. */
+            if( i_start != VLC_TICK_INVALID &&
+                p_pmt->i_last_dts != VLC_TICK_INVALID )
+            {
+                const vlc_tick_t i_last = p_pmt->i_last_dts +
+                                          p_pmt->pcr.i_pcroffset;
+                if( i_last > i_start )
+                {
+                    i64 = i_start + (i_last - i_start) * f;
+                    if( !SeekToTime( p_demux, p_pmt, i64 ) )
+                    {
+                        ReadyQueuesPostSeek( p_demux );
+                        return VLC_SUCCESS;
+                    }
+                }
+            }
+        }
+        else if( p_sys->b_canfastseek && !p_sys->b_ignore_time_for_positions &&
             b_bool && p_pmt &&
             p_pmt->pcr.i_first != VLC_TICK_INVALID &&
             p_pmt->i_last_dts != VLC_TICK_INVALID &&
@@ -2059,7 +2084,13 @@ static int SeekToTime( demux_t *p_demux, const ts_pmt_t *p_pmt, vlc_tick_t i_see
         else if( f_target_byte > i_stream_size - p_sys->i_packet_size )
             f_target_byte = i_stream_size - p_sys->i_packet_size;
 
-        const uint64_t i_target_byte = f_target_byte;
+        uint64_t i_target_byte = f_target_byte;
+        const uint64_t i_alignment = i_start_byte % p_sys->i_packet_size;
+        if( i_target_byte > i_alignment )
+            i_target_byte -= (i_target_byte - i_alignment) %
+                             p_sys->i_packet_size;
+        else
+            i_target_byte = i_alignment;
         return vlc_stream_Seek( p_sys->stream, i_target_byte );
     }
 

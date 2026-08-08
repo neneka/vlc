@@ -220,6 +220,7 @@ typedef struct
 
     /* */
     bool        b_paused;
+    atomic_bool paused_seek_preroll;
     es_out_id_t *p_next_frame_es;
     vlc_tick_t  i_pause_date;
 
@@ -524,6 +525,10 @@ decoder_frame_next_status(vlc_input_decoder_t *decoder, int status,
     };
 
     input_SendEvent(p_sys->p_input, &event);
+
+    vlc_value_t val = { .i_int = status };
+    input_ControlPushHelper(p_sys->p_input, INPUT_CONTROL_FRAME_NEXT_DONE,
+                            &val);
 }
 
 static void
@@ -3762,12 +3767,19 @@ static int EsOutVaControlLocked(es_out_sys_t *p_sys, input_source_t *source,
         /* TODO do not use vlc_tick_now() but proper stream acquisition date */
         const bool b_low_delay = priv->b_low_delay;
         bool b_extra_buffering_allowed = !b_low_delay && EsOutIsExtraBufferingAllowed(p_sys);
-        bool buffering = p_sys->b_buffering || p_sys->p_next_frame_es != NULL;
+        const bool paused_seek_preroll = atomic_load_explicit(
+            &p_sys->paused_seek_preroll, memory_order_relaxed );
+        bool buffering = p_sys->b_buffering || p_sys->p_next_frame_es != NULL
+                      || paused_seek_preroll;
+        /* Sampling the wall clock while paused turns the whole pause duration
+         * into PCR lateness and can trigger a decoder-reset loop. */
+        const vlc_tick_t system_date = paused_seek_preroll
+                                     ? p_sys->i_pause_date : vlc_tick_now();
         vlc_tick_t i_late = input_clock_Update(
                             p_pgrm->p_input_clock,
                             input_CanPaceControl(p_sys->p_input), buffering,
                             b_extra_buffering_allowed,
-                            i_pcr, vlc_tick_now() );
+                            i_pcr, system_date );
 
         if (tracer != NULL)
         {
@@ -3788,7 +3800,8 @@ static int EsOutVaControlLocked(es_out_sys_t *p_sys, input_source_t *source,
             return VLC_SUCCESS;
         }
 
-        if (p_pgrm != p_sys->p_pgrm || p_sys->p_next_frame_es != NULL)
+        if (p_pgrm != p_sys->p_pgrm || p_sys->p_next_frame_es != NULL
+         || paused_seek_preroll)
             return VLC_SUCCESS;
 
         /* The PCR is not considered late, there is no compensation needed. */
@@ -4290,6 +4303,10 @@ static int EsOutVaPrivControlLocked(es_out_sys_t *p_sys, input_source_t *source,
     case ES_OUT_PRIV_SET_FRAME_PREVIOUS:
         EsOutFrameNext( p_sys, query == ES_OUT_PRIV_SET_FRAME_PREVIOUS );
         return VLC_SUCCESS;
+    case ES_OUT_PRIV_SET_PAUSED_SEEK_PREROLL:
+        atomic_store_explicit( &p_sys->paused_seek_preroll,
+                               (bool)va_arg(args, int), memory_order_relaxed );
+        return VLC_SUCCESS;
     case ES_OUT_PRIV_SET_TIMES:
     {
         double f_position = va_arg( args, double );
@@ -4491,6 +4508,7 @@ input_EsOutNew(input_thread_t *p_input, input_source_t *main_source, float rate,
 
     p_sys->rate = rate;
     p_sys->b_paused = false;
+    atomic_init( &p_sys->paused_seek_preroll, false );
 
     p_sys->b_buffering = true;
     p_sys->i_buffering_extra_initial = p_sys->i_buffering_extra_stream
