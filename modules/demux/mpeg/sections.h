@@ -33,6 +33,9 @@ void ts_sections_processor_Add( demux_t *,
                                 ts_section_processor_callback_t pf_callback,
                                 void *p_callback_data );
 
+void ts_sections_processor_Remove( ts_sections_processor_t **pp_chain,
+                                   ts_section_processor_callback_t pf_callback );
+
 void ts_sections_processor_ChainDelete( ts_sections_processor_t *p_chain );
 
 void ts_sections_processor_Reset( ts_sections_processor_t *p_chain );

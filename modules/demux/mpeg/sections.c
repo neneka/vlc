@@ -64,10 +64,10 @@ static void ts_subdecoder_rawsection_Callback( dvbpsi_t *p_dvbpsi,
             if ( p_sec->b_syntax_indicator )
                 i_rawlength += 4;
 
-            if( p_proc->i_table_id && p_section->i_table_id != p_proc->i_table_id )
+            if( p_proc->i_table_id && p_sec->i_table_id != p_proc->i_table_id )
                 continue;
 
-            if( p_proc->i_extension_id && p_section->i_extension != p_proc->i_extension_id )
+            if( p_proc->i_extension_id && p_sec->i_extension != p_proc->i_extension_id )
                 continue;
 
             p_proc->pf_callback( (demux_t *) p_dvbpsi->p_sys,
@@ -98,10 +98,16 @@ void ts_sections_processor_Add( demux_t *p_demux,
     p_proc = malloc( sizeof(ts_sections_processor_t) );
     if( p_proc )
     {
+        p_proc->p_next = NULL;
         p_proc->pf_callback = pf_callback;
         p_proc->i_extension_id = i_extension_id;
         p_proc->i_table_id = i_table_id;
         p_proc->p_dvbpsi = dvbpsi_new( &dvbpsi_messages, DVBPSI_MSG_DEBUG );
+        if( unlikely(p_proc->p_dvbpsi == NULL) )
+        {
+            free( p_proc );
+            return;
+        }
         p_proc->p_dvbpsi->p_sys = p_demux;
         p_proc->p_callback_data = p_callback_data;
 
@@ -114,6 +120,24 @@ void ts_sections_processor_Add( demux_t *p_demux,
         /* Insert as head */
         p_proc->p_next = *pp_chain;
         *pp_chain = p_proc;
+    }
+}
+
+void ts_sections_processor_Remove( ts_sections_processor_t **pp_chain,
+                                   ts_section_processor_callback_t pf_callback )
+{
+    while( *pp_chain )
+    {
+        ts_sections_processor_t *p_proc = *pp_chain;
+        if( p_proc->pf_callback != pf_callback )
+        {
+            pp_chain = &p_proc->p_next;
+            continue;
+        }
+
+        *pp_chain = p_proc->p_next;
+        p_proc->p_next = NULL;
+        ts_sections_processor_ChainDelete( p_proc );
     }
 }
 
@@ -144,6 +168,6 @@ void ts_sections_processor_Push( ts_sections_processor_t *p_chain,
     for( ts_sections_processor_t *p_proc = p_chain;
          p_proc; p_proc = p_proc->p_next )
     {
-        dvbpsi_packet_push( p_chain->p_dvbpsi, (uint8_t *) p_buf );
+        dvbpsi_packet_push( p_proc->p_dvbpsi, (uint8_t *) p_buf );
     }
 }

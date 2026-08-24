@@ -147,8 +147,6 @@ struct ts_stream_t
     } gather;
 
     bool        b_always_receive;
-    bool        b_arib_bml;
-    bool        b_arib_bml_entry;
     bool        b_broken_PUSI_conformance;
     ts_sections_processor_t *p_sections_proc;
     ts_stream_processor_t   *p_proc;

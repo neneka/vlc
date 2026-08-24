@@ -39,6 +39,7 @@
 #include "ts_streams.h"
 #include "ts_psi.h"
 #include "ts_pid.h"
+#include "ts_arib.h"
 #include "ts_streams_private.h"
 #include "ts.h"
 
@@ -406,11 +407,37 @@ static bool PMTEsHasComponentTagBetween( const dvbpsi_pmt_es_t *p_es,
     return p_si->i_component_tag >= i_low && p_si->i_component_tag <= i_high;
 }
 
+static bool PMTEsIsAribBml( const dvbpsi_pmt_es_t *p_es )
+{
+    if( p_es->i_type != 0x0D ) /* DSM-CC sections */
+        return false;
+
+    const dvbpsi_descriptor_t *p_dr = PMTEsFindDescriptor( p_es, 0xFD );
+    if( !p_dr || p_dr->i_length < 2 )
+        return false;
+
+    /* ARIB STD-B10 Annex J: data coding schemes used for BML services on
+     * terrestrial, BS and CS broadcasts. */
+    switch( GetWBE( p_dr->p_data ) )
+    {
+        case 0x0007:
+        case 0x000B:
+        case 0x000C:
+        case 0x000D:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static ts_standards_e ProbePMTStandard( const dvbpsi_pmt_t *p_dvbpsipmt )
 {
     dvbpsi_pmt_es_t *p_dvbpsies;
     for( p_dvbpsies = p_dvbpsipmt->p_first_es; p_dvbpsies; p_dvbpsies = p_dvbpsies->p_next )
     {
+        if( PMTEsIsAribBml( p_dvbpsies ) )
+            return TS_STANDARD_ARIB;
+
         if( p_dvbpsies->i_type == 0x06 )
         {
             /* Probe for ARIB subtitles */
@@ -1689,8 +1716,25 @@ static void FillPESFromDvbpsiES( demux_t *p_demux,
                                  ts_stream_t *p_pes )
 {
     demux_sys_t *p_sys = p_demux->p_sys;
+    ts_stream_t *p_active = GetPID( p_sys, p_dvbpsies->i_pid )->u.p_stream;
+    const ts_es_t *p_previous_es = p_active == p_pes ? NULL :
+                                   ts_stream_Find_es( p_active, p_pmt );
+    const bool b_was_arib_bml = p_previous_es != NULL &&
+                                p_previous_es->fmt.i_codec == VLC_CODEC_ARIB_BML;
     ts_transport_type_t type_change = TS_TRANSPORT_PES;
     PIDFillFormat( p_demux, p_pes, p_dvbpsies->i_type, &type_change );
+
+    const bool b_arib_bml = p_sys->standard == TS_STANDARD_ARIB &&
+                            PMTEsIsAribBml( p_dvbpsies );
+    if( b_arib_bml )
+    {
+        es_format_Change( &p_pes->p_es->fmt, DATA_ES, VLC_CODEC_ARIB_BML );
+        p_pes->p_es->fmt.i_priority = ES_PRIORITY_NOT_DEFAULTABLE;
+        p_pes->p_es->fmt.psz_description =
+            strdup( _("ARIB BML data broadcast") );
+        type_change = TS_TRANSPORT_SECTIONS;
+        p_pes->b_always_receive = true;
+    }
 
     p_pes->i_stream_type = p_dvbpsies->i_type;
 
@@ -1731,8 +1775,11 @@ static void FillPESFromDvbpsiES( demux_t *p_demux,
         case 0x0a: /* DSM-CC */
         case 0x0b:
         case 0x0c:
-        case 0x0d:
             p_pes->transport = TS_TRANSPORT_IGNORE;
+            break;
+        case 0x0d:
+            if( !b_arib_bml )
+                p_pes->transport = TS_TRANSPORT_IGNORE;
             break;
         /* All other private or reserved types */
         case 0x13: /* SL in sections */
@@ -1768,6 +1815,28 @@ static void FillPESFromDvbpsiES( demux_t *p_demux,
         default:
             break;
         }
+    }
+
+    if( p_pes->p_es->fmt.i_codec == VLC_CODEC_ARIB_BML )
+    {
+        /* A PID can already be in use while a PMT is being updated. Configure
+         * the stream attached to the PID, rather than a temporary stream that
+         * may be discarded when the new ES is merged below. */
+        p_active->i_stream_type = p_dvbpsies->i_type;
+        p_active->transport = TS_TRANSPORT_SECTIONS;
+        p_active->b_always_receive = true;
+        ts_sections_processor_Add( p_demux, &p_active->p_sections_proc, 0, 0,
+                                   BML_Section_Callback, NULL );
+    }
+    else if( b_was_arib_bml )
+    {
+        /* Do not leave the old BML callback or section transport attached
+         * after a PMT version changes the meaning of this PID. */
+        ts_sections_processor_Remove( &p_active->p_sections_proc,
+                                      BML_Section_Callback );
+        p_active->i_stream_type = p_dvbpsies->i_type;
+        p_active->transport = p_pes->transport;
+        p_active->b_always_receive = p_pes->b_always_receive;
     }
 
     if( p_pes->p_es->fmt.i_cat == AUDIO_ES )

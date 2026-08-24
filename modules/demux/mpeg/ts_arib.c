@@ -666,8 +666,6 @@ void BML_Section_Callback( demux_t *p_demux,
     VLC_UNUSED(p_payloaddata); VLC_UNUSED(i_payloaddata);
     VLC_UNUSED(p_pes_cb_data);
 
-    msg_Info( p_demux, "BML: section callback called, size %zu", i_sectiondata );
-
     vlc_object_t *obj = VLC_OBJECT(p_demux);
     void (*cb)(const uint8_t*, size_t, void*) = NULL;
     void *opaque = NULL;
@@ -681,7 +679,6 @@ void BML_Section_Callback( demux_t *p_demux,
         obj = vlc_object_parent(obj);
     }
 
-    if (cb) {
+    if (cb)
         cb(p_sectiondata, i_sectiondata, opaque);
-    }
 }

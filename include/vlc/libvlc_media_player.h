@@ -896,7 +896,11 @@ typedef void (*libvlc_video_arib_text_cb)(const char *text, void *opaque);
 /**
  * Callback prototype to report ARIB BML stream data.
  *
- * \param data pointer to the TS section data buffer
+ * The callback is invoked synchronously from the input/demux thread. The data
+ * buffer is only valid for the duration of the callback and must be copied if
+ * it is needed afterwards.
+ *
+ * \param data pointer to the complete TS section data buffer
  * \param size size of the data buffer in bytes
  * \param opaque user data
  */

@@ -1188,15 +1188,13 @@ void libvlc_video_set_bml_callbacks( libvlc_media_player_t *mp,
                                      libvlc_bml_data_cb cb,
                                      void *opaque )
 {
-    libvlc_instance_t *p_libvlc = mp->p_libvlc_instance;
+    if (var_Type(mp, "bml-data-cb") == 0)
+        var_Create(mp, "bml-data-cb", VLC_VAR_ADDRESS);
+    var_SetAddress(mp, "bml-data-cb", (void*)cb);
 
-    if (var_Type(p_libvlc->p_libvlc_int, "bml-data-cb") == 0)
-        var_Create(p_libvlc->p_libvlc_int, "bml-data-cb", VLC_VAR_ADDRESS);
-    var_SetAddress(p_libvlc->p_libvlc_int, "bml-data-cb", (void*)cb);
-
-    if (var_Type(p_libvlc->p_libvlc_int, "bml-data-opaque") == 0)
-        var_Create(p_libvlc->p_libvlc_int, "bml-data-opaque", VLC_VAR_ADDRESS);
-    var_SetAddress(p_libvlc->p_libvlc_int, "bml-data-opaque", opaque);
+    if (var_Type(mp, "bml-data-opaque") == 0)
+        var_Create(mp, "bml-data-opaque", VLC_VAR_ADDRESS);
+    var_SetAddress(mp, "bml-data-opaque", opaque);
 }
 
 void libvlc_video_set_format_callbacks( libvlc_media_player_t *mp,
@@ -2115,7 +2113,9 @@ libvlc_media_player_get_track_from_id( libvlc_media_player_t *p_mi,
 
     vlc_player_Lock(player);
 
-    enum es_format_category_e cats[] = { VIDEO_ES, AUDIO_ES, SPU_ES };
+    enum es_format_category_e cats[] = {
+        VIDEO_ES, AUDIO_ES, SPU_ES, DATA_ES
+    };
     for (size_t i = 0; i < ARRAY_SIZE(cats); ++i)
     {
         enum es_format_category_e cat = cats[i];

@@ -4495,7 +4495,10 @@ input_EsOutNew(input_thread_t *p_input, input_source_t *main_source, float rate,
     EsOutPropsInit( &p_sys->sub,  false, p_input, input_type,
                     ES_OUT_ES_POLICY_AUTO,
                     "sub-track-id", "sub-track", "sub-language", "sub" );
-    EsOutPropsInit( &p_sys->data, true, p_input, input_type,
+    /* Data streams such as ARIB BML are consumed by demux callbacks and do
+     * not have a decoder. Keep them visible as tracks without auto-selecting
+     * them and attempting to create a decoder. */
+    EsOutPropsInit( &p_sys->data, false, p_input, input_type,
                     ES_OUT_ES_POLICY_EXCLUSIVE,
                     NULL, NULL, NULL, "data" );
 
