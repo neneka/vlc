@@ -1,0 +1,125 @@
+From c46823333f8188706a900a30c8ea80fb5262f39c Mon Sep 17 00:00:00 2001
+From: Rainbaby <rainbaby@outlook.jp>
+Date: Fri, 3 Jul 2026 22:19:26 +0900
+Subject: [PATCH 5/9] avformat/mmttlv: expose program and audio-track metadata
+
+Adopt only the MH-EIT present section for the running program, expose the
+MH-audio-component text as the audio track title and mark the main component
+AV_DISPOSITION_DEFAULT, and raise a metadata-update event when the program or a
+track title changes so a player follows program boundaries.
+
+Signed-off-by: Rainbaby <rainbaby@outlook.jp>
+---
+ libavformat/mmtp.c | 58 ++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 53 insertions(+), 5 deletions(-)
+
+diff --git a/libavformat/mmtp.c b/libavformat/mmtp.c
+index 23ed106a54..43cd495035 100644
+--- a/libavformat/mmtp.c
++++ b/libavformat/mmtp.c
+@@ -273,10 +273,13 @@ parse_video_component_descriptor(AVStream *stream, GetByteContext *gbc)
+ static int
+ parse_mh_audio_component_descriptor(AVStream *stream, GetByteContext *gbc)
+ {
+-    uint8_t descriptor_length;
+-    uint8_t stream_content;
+-    uint8_t stream_type;
+-    uint8_t language_code[4];
++    uint8_t       descriptor_length;
++    uint8_t       stream_content;
++    uint8_t       stream_type;
++    uint8_t       language_code[4];
++    const uint8_t *text     = NULL;
++    int           text_len  = 0;
++    int           main_audio = 0;
+ 
+     if (bytestream2_get_bytes_left(gbc) < (16 + 8) / 8)
+         return AVERROR_INVALIDDATA;
+@@ -313,6 +316,7 @@ parse_mh_audio_component_descriptor(AVStream *stream, GetByteContext *gbc)
+ 
+         byte                  = bytestream2_get_byteu(&ngbc);
+         ES_multi_lingual_flag = byte >> 7;
++        main_audio            = (byte >> 6) & 1;
+ 
+         bytestream2_get_bufferu(&ngbc, language_code, 3);
+         language_code[3] = '\0';
+@@ -322,6 +326,10 @@ parse_mh_audio_component_descriptor(AVStream *stream, GetByteContext *gbc)
+                 return AVERROR_INVALIDDATA;
+             bytestream2_skipu(&ngbc, 3);
+         }
++
++        // remaining bytes are the component description text
++        text     = ngbc.buffer;
++        text_len = bytestream2_get_bytes_left(&ngbc);
+     }
+     bytestream2_skipu(gbc, descriptor_length);
+ 
+@@ -343,6 +351,16 @@ parse_mh_audio_component_descriptor(AVStream *stream, GetByteContext *gbc)
+         break;
+     }
+ 
++    if (main_audio)
++        stream->disposition |= AV_DISPOSITION_DEFAULT;
++    if (text_len > 0) {
++        char *title = av_strndup(text, text_len);
++        const AVDictionaryEntry *cur = av_dict_get(stream->metadata, "title", NULL, 0);
++        // flag the change (e.g. a program boundary) so the player re-reads
++        if (title && (cur == NULL || strcmp(cur->value, title) != 0))
++            stream->event_flags |= AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
++        av_dict_set(&stream->metadata, "title", title, AV_DICT_DONT_STRDUP_VAL);
++    }
+     return av_dict_set(&stream->metadata, "language", language_code, 0);
+ }
+ 
+@@ -736,6 +754,14 @@ static int parse_mh_short_event_descriptor(
+         event_name = av_strndup(ngbc.buffer, event_name_length);
+         bytestream2_skipu(&ngbc, event_name_length);
+ 
++        {
++            // present event changes at a program boundary: flag it so the
++            // player re-reads the title rather than showing the one from open
++            const AVDictionaryEntry *cur =
++                av_dict_get(ctx->program->metadata, "title", NULL, 0);
++            if (event_name && (cur == NULL || strcmp(cur->value, event_name) != 0))
++                ctx->s->event_flags |= AVFMT_EVENT_FLAG_METADATA_UPDATED;
++        }
+         av_dict_set(&ctx->program->metadata, "language", language_code, 0);
+         av_dict_set(&ctx->program->metadata, "title", event_name,
+                     AV_DICT_DONT_STRDUP_VAL);
+@@ -960,10 +986,32 @@ static int parse_mh_eit_table(MMTPContext *ctx, GetByteContext *gbc)
+     if (bytestream2_get_bytes_left(gbc) < section_length || section_length < 4)
+         return AVERROR_INVALIDDATA;
+     {
++        uint8_t        version_byte, section_number;
+         GetByteContext ngbc;
+         bytestream2_init(&ngbc, gbc->buffer, section_length - 4);
+ 
+-        bytestream2_skip(&ngbc, (16 + 2 + 5 + 1 + 8 + 8 + 16 + 16 + 8 + 8) / 8);
++        /* MH-EIT[p/f] header: service_id(16) reserved+version+current_next_indicator(8)
++         * section_number(8) last_section_number(8) TLV_stream_id(16) original_network_id(16)
++         * segment_last_section_number(8) last_table_id(8) = 11 bytes. */
++        if (bytestream2_get_bytes_left(&ngbc) <
++            (16 + 8 + 8 + 8 + 16 + 16 + 8 + 8) / 8) {
++            bytestream2_skipu(gbc, section_length);
++            return 0;
++        }
++        bytestream2_skipu(&ngbc, 2);                    /* service_id */
++        version_byte   = bytestream2_get_byteu(&ngbc);  /* .. + current_next_indicator */
++        section_number = bytestream2_get_byteu(&ngbc);
++        bytestream2_skipu(&ngbc, 7);                    /* last_section_number .. last_table_id */
++
++        /* In MH-EIT[p/f], section 0 carries the PRESENT (on-air) event and section 1 the
++         * FOLLOWING (next) event. Only the present event names the current program; parsing the
++         * following section's short_event_descriptor would av_dict_set-overwrite the program's
++         * title/description with the NEXT program's (the "current flips with next" bug). Ignore
++         * any non-present section, and any section not yet current (current_next_indicator == 0). */
++        if (section_number != 0 || !(version_byte & 1)) {
++            bytestream2_skipu(gbc, section_length);
++            return 0;
++        }
+ 
+         while (bytestream2_get_bytes_left(&ngbc) > 0) {
+             uint16_t descriptors_loop_length;
+-- 
+2.39.1
+

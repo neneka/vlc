@@ -1,0 +1,582 @@
+From 5313ffc09589701103c322af6d2935fbcbfba7e3 Mon Sep 17 00:00:00 2001
+From: SuperFashi <admin@superfashi.com>
+Date: Sun, 12 Jan 2025 05:11:44 +0900
+Subject: [PATCH] avformat: add MMTP parser and MMT/TLV demuxer
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This patch adds an MPEG Media Transport Protocol (MMTP) parser, as defined in ISO/IEC 23008-1, and an MMT protocol over TLV packets (MMT/TLV) demuxer, as defined in ARIB STD-B32. Currently, it supports HEVC, AAC LATM, and ARIB-TTML demuxing.
+
+Since MMTP is designed to transmit over IP, there is no size information within each MMTP packet, and there is no on-disk format defined alongside the protocol. One industrial solution is a simple container format using type–length–value packets, which is defined in ARIB STD-B32.
+
+Another known container format for MMTP is using packet capture (pcap) files which records network packets. This patch does not include the demuxer for this container format.
+
+Signed-off-by: SuperFashi <admin@superfashi.com>
+Original-Committer: Rainbaby <rainbaby@outlook.jp>
+---
+ libavformat/mmtp.c   | 208 +++++++++++++++++++++++--------------------
+ libavformat/mmtp.h   |   2 +-
+ libavformat/mmttlv.c |  75 +++++++++++++---
+ 3 files changed, 172 insertions(+), 113 deletions(-)
+
+diff --git a/libavformat/mmtp.c b/libavformat/mmtp.c
+index a61affc..da19895 100644
+--- a/libavformat/mmtp.c
++++ b/libavformat/mmtp.c
+@@ -1,6 +1,6 @@
+ /*
+  * MPEG Media Transport Protocol (MMTP) parser, as defined in ISO/IEC 23008-1.
+- * Copyright (c) 2023 SuperFashi
++ * Copyright (c) 2025 SuperFashi G.K.
+  *
+  * This file is part of FFmpeg.
+  *
+@@ -22,13 +22,13 @@
+ #include <stdbool.h>
+ 
+ #include "libavcodec/bytestream.h"
++#include "libavcodec/avcodec.h"
+ #include "libavutil/avassert.h"
+-#include "libavutil/intreadwrite.h"
+ #include "libavutil/mem.h"
+ #include "demux.h"
+ #include "internal.h"
+ #include "mmtp.h"
+-#include "network.h"
++#include <netinet/in.h>
+ 
+ struct MMTGeneralLocationInfo {
+     uint8_t location_type;
+@@ -128,11 +128,13 @@ static int parse_mmt_general_location_info(
+ struct Streams {
+     AVStream *stream;
+ 
++    AVCodecParserContext *parser;
++
+     int num_timestamp_descriptors;
+     struct MPUTimestampDescriptor {
+         uint32_t seq_num;
+         int64_t  presentation_time;
+-    } *timestamp_descriptor;
++    }   *timestamp_descriptor;
+ 
+     int num_ext_timestamp_descriptors;
+     struct MPUExtendedTimestampDescriptor {
+@@ -142,14 +144,13 @@ struct Streams {
+         struct {
+             uint16_t dts_pts_offset;
+             uint16_t pts_offset;
+-        } au[0x100];
+-    } *ext_timestamp_descriptor;
++        }        au[0x100];
++    }   *ext_timestamp_descriptor;
+ 
+-    uint32_t    last_sequence_number;
+-    uint16_t    au_count;
+-    AVBufferRef *pending_buffer;
+-    int64_t     offset;
+-    int         flags;
++    uint32_t last_sequence_number;
++    uint16_t au_count;
++    int64_t  offset;
++    int      flags;
+ 
+     struct Streams *next;
+ };
+@@ -164,7 +165,7 @@ struct MMTPContext {
+     AVFormatContext *s;
+     AVPacket        *pkt;
+     uint16_t        current_pid;
+-    bool            is_rap;
++    uint8_t         is_rap;
+ };
+ 
+ static struct Streams *find_current_stream(struct MMTPContext *ctx)
+@@ -182,10 +183,8 @@ find_or_allocate_stream(struct MMTPContext *ctx, uint16_t pid)
+     AVStream       *stream;
+     struct Streams *streams;
+     for (streams = ctx->streams; streams != NULL; streams = streams->next)
+-        if (streams->stream->id == pid) {
+-            ffstream(streams->stream)->need_context_update = 1;
++        if (streams->stream->id == pid)
+             return streams;
+-        }
+ 
+     stream = avformat_new_stream(ctx->s, NULL);
+     if (stream == NULL) return NULL;
+@@ -208,13 +207,13 @@ enum {
+ };
+ 
+ enum {
+-    MPU_TIMESTAMP_DESCRIPTOR                  = 0x0001,
+-    VIDEO_COMPONENT_DESCRIPTOR                = 0x8010,
+-    MH_STREAM_IDENTIFIER_DESCRIPTOR           = 0x8011,
+-    MH_AUDIO_COMPONENT_DESCRIPTOR             = 0x8014,
+-    MH_DATA_COMPONENT_DESCRIPTOR              = 0x8020,
+-    MPU_EXTENDED_TIMESTAMP_DESCRIPTOR         = 0x8026,
+-    MH_SHORT_EVENT_DESCRIPTOR                 = 0xF001,
++    MPU_TIMESTAMP_DESCRIPTOR          = 0x0001,
++    VIDEO_COMPONENT_DESCRIPTOR        = 0x8010,
++    MH_STREAM_IDENTIFIER_DESCRIPTOR   = 0x8011,
++    MH_AUDIO_COMPONENT_DESCRIPTOR     = 0x8014,
++    MH_DATA_COMPONENT_DESCRIPTOR      = 0x8020,
++    MPU_EXTENDED_TIMESTAMP_DESCRIPTOR = 0x8026,
++    MH_SHORT_EVENT_DESCRIPTOR         = 0xF001,
+ };
+ 
+ static int
+@@ -639,10 +638,11 @@ parse_stream_identifier_descriptor(AVStream *stream, GetByteContext *gbc)
+     return 0;
+ }
+ 
+-static int skip_unknown_descriptor(void *log, GetByteContext *gbc) {
++static int skip_unknown_descriptor(void *log, GetByteContext *gbc)
++{
+     // assumes at least 3 bytes left to read in gbc
+     const uint16_t descriptor_tag = bytestream2_get_be16u(gbc);
+-    unsigned int descriptor_length;
++    unsigned int   descriptor_length;
+ 
+     av_log(log, AV_LOG_VERBOSE, "Unknown descriptor: 0x%04x\n", descriptor_tag);
+ 
+@@ -1097,7 +1097,7 @@ struct FragmentAssembler {
+         NOT_STARTED,
+         IN_FRAGMENT,
+         SKIP,
+-    } state;
++    }        state;
+ };
+ 
+ static int
+@@ -1119,7 +1119,7 @@ append_data(struct FragmentAssembler *ctx, const uint8_t *data, uint32_t size)
+     return 0;
+ }
+ 
+-static int
++static void
+ check_state(MMTPContext *ctx, struct FragmentAssembler *ass, uint32_t seq_num)
+ {
+     if (ass->state == INIT) {
+@@ -1138,7 +1138,6 @@ check_state(MMTPContext *ctx, struct FragmentAssembler *ass, uint32_t seq_num)
+         ass->state = SKIP;
+     }
+     ass->last_seq = seq_num;
+-    return 0;
+ }
+ 
+ static int assemble_fragment(
+@@ -1224,8 +1223,7 @@ static int parse_signalling_messages(
+ 
+     bytestream2_skipu(gbc, 1);
+ 
+-    if ((err = check_state(ctx, assembler, seq_num)) < 0)
+-        return err;
++    check_state(ctx, assembler, seq_num);
+ 
+     if (!aggregation_flag)
+         return assemble_fragment(
+@@ -1256,7 +1254,7 @@ static int parse_signalling_messages(
+     return 0;
+ }
+ 
+-static int fill_pts_dts(MMTPContext *ctx, struct Streams *s)
++static int fill_pts_dts(struct Streams *s)
+ {
+     struct MPUTimestampDescriptor         *desc     = NULL;
+     struct MPUExtendedTimestampDescriptor *ext_desc = NULL;
+@@ -1287,12 +1285,12 @@ static int fill_pts_dts(MMTPContext *ctx, struct Streams *s)
+     if (s->au_count >= ext_desc->num_of_au)
+         return AVERROR_INVALIDDATA;
+ 
+-    ctx->pkt->dts = ptime - ext_desc->decoding_time_offset;
++    s->parser->dts = ptime - ext_desc->decoding_time_offset;
+ 
+     for (j = 0; j < s->au_count; ++j)
+-        ctx->pkt->dts += ext_desc->au[j].pts_offset;
++        s->parser->dts += ext_desc->au[j].pts_offset;
+ 
+-    ctx->pkt->pts = ctx->pkt->dts + ext_desc->au[s->au_count].dts_pts_offset;
++    s->parser->pts = s->parser->dts + ext_desc->au[s->au_count].dts_pts_offset;
+ 
+     ++s->au_count;
+     return 0;
+@@ -1363,35 +1361,68 @@ static int emit_closed_caption_mfu(MMTPContext *ctx, struct Streams *st,
+     return 0;
+ }
+ 
+-static int emit_packet(MMTPContext *ctx, struct Streams *st, AVBufferRef *buf)
++static int
++emit_packet(MMTPContext *ctx, struct Streams *st, uint8_t *data, int size)
+ {
+-    int err;
+-    av_assert0(ctx->pkt != NULL);
+-    av_packet_unref(ctx->pkt);
+-    if ((err = fill_pts_dts(ctx, st)) < 0) {
+-        av_buffer_unref(&buf);
+-        return err;
++    int      err;
++    int      consumed;
++    uint8_t *out_data = NULL;
++    int      out_size = 0;
++
++    if (st->parser == NULL) {
++        st->parser = av_parser_init(st->stream->codecpar->codec_id);
++        if (st->parser == NULL) return AVERROR(ENOMEM);
++        st->parser->last_pos = 0;
+     }
+-    ctx->pkt->buf          = buf;
+-    ctx->pkt->data         = buf->data;
+-    ctx->pkt->size         = buf->size - AV_INPUT_BUFFER_PADDING_SIZE;
+-    ctx->pkt->stream_index = st->stream->index;
+-    ctx->pkt->flags        = st->flags;
+-    ctx->pkt->pos          = st->offset;
+-    ctx->pkt               = NULL;
+ 
+-    st->flags  = 0;
+-    st->offset = -1;
++    while (size > 0) {
++        if (st->parser->fetch_timestamp) {
++            if ((err = fill_pts_dts(st)) < 0)
++                return err;
++            st->parser->fetch_timestamp = false;
++            st->parser->pos             = st->offset;
++            // use last_pos to store flags
++            st->parser->last_pos        = st->flags;
++        }
++        st->offset = -1;
++        st->flags  = 0;
++
++        consumed = av_parser_parse2(
++            st->parser, ffstream(st->stream)->avctx,
++            &out_data, &out_size,
++            data, size,
++            AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0
++        );
++        size -= consumed;
++
++        if (out_data == NULL) {
++            continue;
++        }
++        st->parser->fetch_timestamp = true;
++
++        av_assert0(ctx->pkt->data == NULL);
++        ctx->pkt->data = (uint8_t *) out_data;
++        ctx->pkt->size = out_size;
++
++        if ((err = av_packet_make_refcounted(ctx->pkt)) < 0)
++            return err;
++
++        ctx->pkt->pos          = st->parser->pos;
++        ctx->pkt->pts          = st->parser->pts;
++        ctx->pkt->dts          = st->parser->dts;
++        ctx->pkt->stream_index = st->stream->index;
++        ctx->pkt->flags        = st->parser->last_pos;
++        if (st->parser->key_frame == 1)
++            ctx->pkt->flags |= AV_PKT_FLAG_KEY;
++    }
+     return 0;
+ }
+ 
+ static int consume_mfu(MMTPContext *ctx, GetByteContext *gbc)
+ {
+     int            err;
+-    AVBufferRef    *buf_ref;
++    uint8_t        *buf;
+     unsigned int   size;
+-    uint8_t        byte;
+-    size_t         old_size;
+     struct Streams *st = find_current_stream(ctx);
+     av_assert0(st != NULL);
+ 
+@@ -1399,46 +1430,25 @@ static int consume_mfu(MMTPContext *ctx, GetByteContext *gbc)
+     case AV_CODEC_ID_HEVC:
+         size = bytestream2_get_be32(gbc);
+         if (size != bytestream2_get_bytes_left(gbc)) return AVERROR_INVALIDDATA;
+-        if (size < 1) // we expect to extract NAL unit header type below
+-            return AVERROR_INVALIDDATA;
+-        byte = bytestream2_peek_byteu(gbc);
+-        if ((byte >> 7) != 0) return AVERROR_INVALIDDATA; // forbidden_zero_bit
+-
+-        old_size = st->pending_buffer == NULL ? 0 :
+-                   (st->pending_buffer->size - AV_INPUT_BUFFER_PADDING_SIZE);
+-        if ((err = av_buffer_realloc(
+-            &st->pending_buffer,
+-            old_size + size + 4 + AV_INPUT_BUFFER_PADDING_SIZE)) < 0)
+-            return err;
+-        // fix start code (00 00 00 01)
+-        AV_WB32(st->pending_buffer->data + old_size, 1);
+-        bytestream2_get_bufferu(
+-            gbc, st->pending_buffer->data + old_size + 4, size);
+-        if (((byte >> 1) & 0b111111) < 0x20) { // a VCL NAL unit
+-            // Because we can't emit a packet without a valid PTS, we need to
+-            // aggregate the non-VCL NAL units with VCL ones. Although we didn't
+-            // technically identify an access unit here, this works for all samples
+-            // we have.
+-            buf_ref = st->pending_buffer;
+-            st->pending_buffer = NULL;
+-
+-            memset(buf_ref->data + old_size + size + 4, 0,
+-                   AV_INPUT_BUFFER_PADDING_SIZE);
+-            return emit_packet(ctx, st, buf_ref);
+-        }
+-        return 0;
++        if ((buf = av_malloc(size + 3)) == NULL) return AVERROR(ENOMEM);
++        buf[0] = 0x00;
++        buf[1] = 0x00;
++        buf[2] = 0x01;
++        bytestream2_get_bufferu(gbc, buf + 3, size);
++        err = emit_packet(ctx, st, buf, size + 3);
++        av_free(buf);
++        return err;
+     case AV_CODEC_ID_AAC_LATM:
+         size = bytestream2_get_bytes_left(gbc);
+         if (size >> 13) return AVERROR(EOVERFLOW);
+-        if ((buf_ref = av_buffer_alloc(
+-            size + 3 + AV_INPUT_BUFFER_PADDING_SIZE)) == NULL)
+-            return AVERROR(ENOMEM);
+-        buf_ref->data[0] = 0x56;
+-        buf_ref->data[1] = 0xe0 | (size >> 8);
+-        buf_ref->data[2] = size & 0xff;
+-        bytestream2_get_bufferu(gbc, buf_ref->data + 3, size);
+-        memset(buf_ref->data + 3 + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+-        return emit_packet(ctx, st, buf_ref);
++        if ((buf = av_malloc(size + 3)) == NULL) return AVERROR(ENOMEM);
++        buf[0] = 0x56;
++        buf[1] = 0xe0 | (size >> 8);
++        buf[2] = size & 0xff;
++        bytestream2_get_bufferu(gbc, buf + 3, size);
++        err = emit_packet(ctx, st, buf, size + 3);
++        av_free(buf);
++        return err;
+     case AV_CODEC_ID_TTML:
+         return emit_closed_caption_mfu(ctx, st, gbc);
+     default:
+@@ -1522,17 +1532,16 @@ static int parse_mpu(MMTPContext *ctx, uint32_t seq_num, GetByteContext *gbc)
+         streams->last_sequence_number = mpu_sequence_number;
+         streams->au_count             = 0;
+     } else if (mpu_sequence_number != streams->last_sequence_number) {
+-        av_log(streams->stream, AV_LOG_ERROR,
++        av_log(streams->stream, AV_LOG_WARNING,
+                "MPU sequence number jump: %u + 1 != %u\n",
+                streams->last_sequence_number, mpu_sequence_number);
+-        return AVERROR_INVALIDDATA;
++        streams->last_sequence_number = mpu_sequence_number;
++        streams->au_count             = 0;
+     }
+ 
+-    if ((err = check_state(ctx, assembler, seq_num)) < 0)
+-        return err;
++    check_state(ctx, assembler, seq_num);
+ 
+-    if (fragmentation_indicator == NOT_FRAGMENTED ||
+-        fragmentation_indicator == FIRST_FRAGMENT)
++    if (streams->offset == -1)
+         streams->offset = ctx->pkt->pos;
+ 
+     if (ctx->is_rap)
+@@ -1647,7 +1656,7 @@ int ff_mmtp_parse_packet(MMTPContext *ctx, AVFormatContext *s, AVPacket *pkt,
+         break;
+     }
+     if (err < 0) return err;
+-    return ctx->pkt == NULL ? 0 : FFERROR_REDO;
++    return (pkt == NULL || pkt->data != NULL) ? 0 : FFERROR_REDO;
+ }
+ 
+ void ff_mmtp_reset_state(MMTPContext *ctx)
+@@ -1661,11 +1670,14 @@ void ff_mmtp_reset_state(MMTPContext *ctx)
+         assembler->size  = 0;
+     }
+     for (streams = ctx->streams; streams != NULL; streams = streams->next) {
++        if (streams->parser != NULL) {
++            av_parser_close(streams->parser);
++            streams->parser = NULL;
++        }
+         streams->last_sequence_number = 0;
+         streams->au_count             = 0;
+         streams->flags                = 0;
+         streams->offset               = -1;
+-        av_buffer_unref(&streams->pending_buffer);
+     }
+ }
+ 
+@@ -1683,9 +1695,9 @@ void ff_mmtp_parse_close(MMTPContext *ctx)
+ 
+     for (streams = ctx->streams; streams != NULL;) {
+         struct Streams *next = streams->next;
++        if (streams->parser != NULL) av_parser_close(streams->parser);
+         av_free(streams->timestamp_descriptor);
+         av_free(streams->ext_timestamp_descriptor);
+-        av_buffer_unref(&streams->pending_buffer);
+         av_free(streams);
+         streams = next;
+     }
+diff --git a/libavformat/mmtp.h b/libavformat/mmtp.h
+index 300a6a1..4aac0f4 100644
+--- a/libavformat/mmtp.h
++++ b/libavformat/mmtp.h
+@@ -1,6 +1,6 @@
+ /*
+  * MPEG Media Transport Protocol (MMTP) parser, as defined in ISO/IEC 23008-1.
+- * Copyright (c) 2023 SuperFashi
++ * Copyright (c) 2025 SuperFashi G.K.
+  *
+  * This file is part of FFmpeg.
+  *
+diff --git a/libavformat/mmttlv.c b/libavformat/mmttlv.c
+index f063316..04695a3 100644
+--- a/libavformat/mmttlv.c
++++ b/libavformat/mmttlv.c
+@@ -1,6 +1,6 @@
+ /*
+  * MMT protocol over TLV packets (MMT/TLV) demuxer, as defined in ARIB STD-B32.
+- * Copyright (c) 2023 SuperFashi
++ * Copyright (c) 2025 SuperFashi G.K.
+  *
+  * This file is part of FFmpeg.
+  *
+@@ -56,8 +56,12 @@ static int mmttlv_probe(const AVProbeData *p)
+     int processed  = 0;
+     int recognized = 0;
+ 
+-    for (i = 0; i + 4 < p->buf_size && processed < 100; ++processed) {
+-        if (p->buf[i] != HEADER_BYTE) return 0;
++    for (i = 0; i + 4 < p->buf_size && processed < 100;) {
++        if (p->buf[i] != HEADER_BYTE) {
++            ++i;
++            continue;
++        }
++        ++processed;
+ 
+         packet_type = p->buf[i + 1];
+         data_length = AV_RB16(p->buf + i + 2);
+@@ -71,17 +75,19 @@ static int mmttlv_probe(const AVProbeData *p)
+             case CONTEXT_IDENTIFICATION_PARTIAL_IPV6_AND_PARTIAL_UDP_HEADER:
+             case CONTEXT_IDENTIFICATION_NO_COMPRESSED_HEADER:
+                 ++recognized;
++                i += data_length;
+             }
+         } else if (packet_type == NULL_PACKET) {
++            if (data_length < 1) goto skip;
+             // null packets should contain all 0xFFs
+-            for (j = i; j < i + data_length && j < p->buf_size; ++j) {
+-                if (p->buf[j] != 0xFF) goto skip;
++            for (j = i; j < i + data_length; ++j) {
++                if (j >= p->buf_size || p->buf[j] != 0xFF) goto skip;
+             }
+             ++recognized;
++            i += data_length;
+         }
+ 
+-        skip:
+-        i += data_length;
++        skip:;
+     }
+ 
+     return recognized * AVPROBE_SCORE_MAX / FFMAX(processed, 10);
+@@ -101,6 +107,37 @@ struct MMTTLVContext {
+     uint8_t *buf;
+ };
+ 
++static int mmttlv_read_ipv6_packet(
++    struct MMTTLVContext *ctx, AVFormatContext *s, AVPacket *pkt,
++    const uint8_t *buf, uint16_t size)
++{
++    uint8_t  next_header;
++    uint16_t payload_length;
++    uint16_t dst_port;
++
++    // 1. parse ipv6 header
++    if (size < 40) return AVERROR_INVALIDDATA;
++    next_header = buf[6];
++    size -= 40;
++    buf += 40;
++
++    if (next_header != 17) return AVERROR_PATCHWELCOME;
++    // 2. parse udp header
++    if (size < 8) return AVERROR_INVALIDDATA;
++    dst_port       = AV_RB16(buf + 2);
++    payload_length = AV_RB16(buf + 4);
++    // TODO: checksum
++    size -= 8;
++    buf += 8;
++
++    if (size != payload_length - 8) return AVERROR_INVALIDDATA;
++    if (dst_port == 123) {
++        // NTP
++        return pkt == NULL ? 0 : FFERROR_REDO;
++    }
++    return AVERROR_PATCHWELCOME;
++}
++
+ static int mmttlv_read_compressed_ip_packet(
+     struct MMTTLVContext *ctx, AVFormatContext *s, AVPacket *pkt,
+     const uint8_t *buf, uint16_t size)
+@@ -170,7 +207,7 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+             if ((err = ffio_ensure_seekback(s->pb, 4)) < 0)
+                 return err;
+ 
+-            if ((err = avio_read(s->pb, header, 4)) < 4)
++            if ((err = avio_read(s->pb, header, 4)) < 0)
+                 return avio_feof(s->pb) ? AVERROR_EOF : err;
+ 
+             if (header[0] != HEADER_BYTE) {
+@@ -195,12 +232,14 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+ 
+             if (header[0] == HEADER_BYTE) {
+                 // found HEADER, [size], HEADER, should be good
+-                if ((pos = avio_seek(s->pb, -size - 1 - 4, SEEK_CUR)) < 0)
++                if ((pos = avio_seek(
++                    s->pb, -(int64_t) (size) - 1 - 4, SEEK_CUR)) < 0)
+                     return (int) pos;
+                 goto success;
+             }
+ 
+-            if ((pos = avio_seek(s->pb, -size - 1 - 3, SEEK_CUR)) < 0)
++            if ((pos = avio_seek(
++                s->pb, -(int64_t) (size) - 1 - 3, SEEK_CUR)) < 0)
+                 return (int) pos;
+         }
+         return AVERROR_INVALIDDATA;
+@@ -222,7 +261,7 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+         return AVERROR_INVALIDDATA;
+ 
+     size = AV_RB16(header + 2);
+-    if (header[1] != HEADER_COMPRESSED_IP_PACKET) {
++    if (header[1] == NULL_PACKET) {
+         if ((ctx->last_pos = avio_skip(s->pb, size)) < 0)
+             return (int) ctx->last_pos;
+         return pkt == NULL ? 0 : FFERROR_REDO;
+@@ -236,7 +275,15 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+     if ((err = ffio_read_size(s->pb, ctx->buf, size)) < 0)
+         return avio_feof(s->pb) ? AVERROR_EOF : err;
+     ctx->last_pos += size;
+-    return mmttlv_read_compressed_ip_packet(ctx, s, pkt, ctx->buf, size);
++
++    switch (header[1]) {
++    case IPV6_PACKET:
++        return mmttlv_read_ipv6_packet(ctx, s, pkt, ctx->buf, size);
++    case HEADER_COMPRESSED_IP_PACKET:
++        return mmttlv_read_compressed_ip_packet(ctx, s, pkt, ctx->buf, size);
++    default:
++        return AVERROR_PATCHWELCOME;
++    }
+ }
+ 
+ static int mmttlv_read_header(AVFormatContext *s)
+@@ -287,7 +334,7 @@ static int mmttlv_read_close(AVFormatContext *ctx)
+         program = next;
+     }
+     priv->programs = NULL;
+-    priv->cap = 0;
++    priv->cap      = 0;
+     av_freep(&priv->buf);
+     return 0;
+ }
+@@ -335,4 +382,4 @@ const FFInputFormat ff_mmttlv_demuxer = {
+     .read_close     = mmttlv_read_close,
+     .read_timestamp = mmttlv_read_timestamp,
+ };
+-#endif
+\ No newline at end of file
++#endif

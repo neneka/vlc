@@ -1,0 +1,60 @@
+From 8e0a0aaed2bff5aaebeab168d695c9baa65528cb Mon Sep 17 00:00:00 2001
+From: ci7lus <7887955+ci7lus@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 19:59:08 +0900
+Subject: [PATCH] avformat/mmtp: notify metadata changes for VLC program
+ metadata
+
+Compare MH-EIT present-event title, description, and language before updating
+the AVProgram dictionary, including additions and removals. Signal the format
+metadata event so VLC can refresh the selected program metadata at boundaries.
+
+---
+ libavformat/mmtp.c | 27 +++++++++++++++------------
+ 1 file changed, 15 insertions(+), 12 deletions(-)
+
+diff --git a/libavformat/mmtp.c b/libavformat/mmtp.c
+index ef7e956839..f9294bc931 100644
+--- a/libavformat/mmtp.c
++++ b/libavformat/mmtp.c
+@@ -754,24 +754,27 @@ static int parse_mh_short_event_descriptor(
+         event_name = av_strndup(ngbc.buffer, event_name_length);
+         bytestream2_skipu(&ngbc, event_name_length);
+ 
+-        {
+-            // present event changes at a program boundary: flag it so the
+-            // player re-reads the title rather than showing the one from open
+-            const AVDictionaryEntry *cur =
+-                av_dict_get(ctx->program->metadata, "title", NULL, 0);
+-            if (event_name && (cur == NULL || strcmp(cur->value, event_name) != 0))
+-                ctx->s->event_flags |= AVFMT_EVENT_FLAG_METADATA_UPDATED;
+-        }
+-        av_dict_set(&ctx->program->metadata, "language", language_code, 0);
+-        av_dict_set(&ctx->program->metadata, "title", event_name,
+-                    AV_DICT_DONT_STRDUP_VAL);
+-
+         text_length = bytestream2_get_be16u(&ngbc);
+         if (bytestream2_get_bytes_left(&ngbc) < text_length)
+             return AVERROR_INVALIDDATA;
+         text = av_strndup(ngbc.buffer, text_length);
+         bytestream2_skipu(&ngbc, text_length);
+ 
++        /* Notify VLC when any present-event field changes, including removal. */
++        const AVDictionaryEntry *cur = av_dict_get(ctx->program->metadata, "title", NULL, 0);
++        const AVDictionaryEntry *desc = av_dict_get(ctx->program->metadata, "description", NULL, 0);
++        const AVDictionaryEntry *lang = av_dict_get(ctx->program->metadata, "language", NULL, 0);
++        if ((event_name != NULL) != (cur != NULL) ||
++            (event_name && cur && strcmp(cur->value, event_name) != 0) ||
++            ((text != NULL) != (desc != NULL)) ||
++            (text && desc && strcmp(desc->value, text) != 0) ||
++            (lang == NULL || strcmp((const char *)language_code, lang->value) != 0))
++            ctx->s->event_flags |= AVFMT_EVENT_FLAG_METADATA_UPDATED;
++
++        av_dict_set(&ctx->program->metadata, "language", language_code, 0);
++        av_dict_set(&ctx->program->metadata, "title", event_name,
++                    AV_DICT_DONT_STRDUP_VAL);
++
+         av_dict_set(&ctx->program->metadata, "description", text,
+                     AV_DICT_DONT_STRDUP_VAL);
+     }
+-- 
+2.39.1

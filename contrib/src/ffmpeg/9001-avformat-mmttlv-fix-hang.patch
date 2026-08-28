@@ -1,0 +1,19 @@
+From e2e2c9b71fb81346135cff464aaa6d2c3405179d Mon Sep 17 00:00:00 2001
+From: otya <otya281@gmail.com>
+Date: Sat, 7 Dec 2024 22:53:49 +0900
+Subject: [PATCH] fix hang
+
+
+diff --git a/libavformat/mmttlv.c b/libavformat/mmttlv.c
+index 48b4b1eaca..f06331663a 100644
+--- a/libavformat/mmttlv.c
++++ b/libavformat/mmttlv.c
+@@ -170,7 +170,7 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+             if ((err = ffio_ensure_seekback(s->pb, 4)) < 0)
+                 return err;
+ 
+-            if ((err = avio_read(s->pb, header, 4)) < 0)
++            if ((err = avio_read(s->pb, header, 4)) < 4)
+                 return avio_feof(s->pb) ? AVERROR_EOF : err;
+ 
+             if (header[0] != HEADER_BYTE) {

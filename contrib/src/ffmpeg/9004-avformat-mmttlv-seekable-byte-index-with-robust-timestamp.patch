@@ -1,0 +1,360 @@
+From c056c2834cc4e593c3bc60e3036437d502e008a3 Mon Sep 17 00:00:00 2001
+From: Rainbaby <rainbaby@outlook.jp>
+Date: Fri, 3 Jul 2026 22:16:28 +0900
+Subject: [PATCH 3/9] avformat/mmttlv: seekable byte index with a robust
+ timestamp probe
+
+The demuxer exposed no byte position, so AVFMT_GENERIC_INDEX never grew and a
+backward seek collapsed to the end of the file. Carry each access unit's offset
+on its packet so the index builds, and harden read_timestamp so its TLV resync
+skips coded video that happens to resemble a header, keeping the byte binary
+search reliable while forward seeks stay fast. The duration scan is bounded and
+the resync window restored afterwards, and timestamps are normalized so seekable
+and streamed inputs share one origin.
+
+Signed-off-by: Rainbaby <rainbaby@outlook.jp>
+---
+ libavformat/mmtp.c   |  19 +++--
+ libavformat/mmttlv.c | 197 ++++++++++++++++++++++++++++++++++++++-----
+ 2 files changed, 188 insertions(+), 28 deletions(-)
+
+diff --git a/libavformat/mmtp.c b/libavformat/mmtp.c
+index 5939d67ac0..ec5d89d575 100644
+--- a/libavformat/mmtp.c
++++ b/libavformat/mmtp.c
+@@ -1364,10 +1364,10 @@ static int emit_closed_caption_mfu(MMTPContext *ctx, struct Streams *st,
+ static int
+ emit_packet(MMTPContext *ctx, struct Streams *st, uint8_t *data, int size)
+ {
+-    int      err;
+-    int      consumed;
+-    uint8_t *out_data = NULL;
+-    int      out_size = 0;
++    int           err;
++    int           consumed;
++    const uint8_t *out_data = NULL;
++    int           out_size  = 0;
+ 
+     if (st->parser == NULL) {
+         st->parser = av_parser_init(st->stream->codecpar->codec_id);
+@@ -1383,15 +1383,16 @@ emit_packet(MMTPContext *ctx, struct Streams *st, uint8_t *data, int size)
+             st->parser->pos             = st->offset;
+             // use last_pos to store flags
+             st->parser->last_pos        = st->flags;
++            // clear only after handing them over; parse_mpu sets the next AU's
++            // offset before the parser reaches this frame boundary
++            st->offset = -1;
++            st->flags  = 0;
+         }
+-        st->offset = -1;
+-        st->flags  = 0;
+ 
+-        consumed = av_parser_parse2(
++        consumed = st->parser->parser->parser_parse(
+             st->parser, ffstream(st->stream)->avctx,
+             &out_data, &out_size,
+-            data, size,
+-            AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0
++            data, size
+         );
+         size -= consumed;
+ 
+diff --git a/libavformat/mmttlv.c b/libavformat/mmttlv.c
+index 7a500e75ce..8cfab1929e 100644
+--- a/libavformat/mmttlv.c
++++ b/libavformat/mmttlv.c
+@@ -78,10 +78,9 @@ static int mmttlv_probe(const AVProbeData *p)
+                 i += data_length;
+             }
+         } else if (packet_type == NULL_PACKET) {
+-            if (data_length < 1) goto skip;
+             // null packets should contain all 0xFFs
+-            for (j = i; j < i + data_length; ++j) {
+-                if (j >= p->buf_size || p->buf[j] != 0xFF) goto skip;
++            for (j = i; j < i + data_length && j < p->buf_size; ++j) {
++                if (p->buf[j] != 0xFF) goto skip;
+             }
+             ++recognized;
+             i += data_length;
+@@ -105,6 +104,8 @@ struct MMTTLVContext {
+ 
+     size_t  cap;
+     uint8_t *buf;
++
++    int64_t first_pts;
+ };
+ 
+ static int mmttlv_read_ipv6_packet(
+@@ -203,7 +204,10 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+     uint16_t             size;
+     int                  err;
+     struct MMTTLVContext *ctx = s->priv_data;
+-    int64_t              pos  = avio_tell(s->pb);
++    int64_t              pos;
++
++    retry:
++    pos = avio_tell(s->pb);
+ 
+     if (pos < 0) return (int) pos;
+     if (pos != ctx->last_pos) {
+@@ -288,12 +292,98 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+ 
+     switch (header[1]) {
+     case IPV6_PACKET:
+-        return mmttlv_read_ipv6_packet(ctx, s, pkt, ctx->buf, size);
++        err = mmttlv_read_ipv6_packet(ctx, s, pkt, ctx->buf, size);
++        break;
+     case HEADER_COMPRESSED_IP_PACKET:
+-        return mmttlv_read_compressed_ip_packet(ctx, s, pkt, ctx->buf, size);
++        err = mmttlv_read_compressed_ip_packet(ctx, s, pkt, ctx->buf, size);
++        break;
++    case TRANSMISSION_CONTROL_PACKET:
++        err = FFERROR_REDO;
++        break;
+     default:
+-        return AVERROR_PATCHWELCOME;
++        av_log(s, AV_LOG_INFO, "Unsupported TLV packet type: 0x%02x\n", header[1]);
++        err = FFERROR_REDO;
++    }
++
++    if (err == FFERROR_REDO)
++        goto retry;
++
++    // A malformed MMTP payload must not abort the whole demux. A real capture
++    // splices/reconfigures mid-stream (here ~35 s in, at a packet_sequence_number
++    // discontinuity), which can leave a truncated MPU, a stale timestamp
++    // descriptor, or a broken fragment run — any of which surfaces as
++    // AVERROR_INVALIDDATA from the MMTP parser. The offending TLV packet has
++    // already been consumed (avio and last_pos point at the next packet), so drop
++    // it and resync on the following one instead of returning fatally. Without
++    // this, one bad packet ends playback at the discontinuity and defeats every
++    // seek that must read across it.
++    if (err == AVERROR_INVALIDDATA) {
++        if (pkt)
++            av_packet_unref(pkt);
++        goto retry;
++    }
++
++    if (err >= 0 && pkt) {
++        // On a non-seekable input read_header cannot scan for first_pts, so anchor
++        // it on the first timestamped packet; MMT presentation times are absolute
++        // (NTP-derived) and would otherwise reach the decoder unnormalized.
++        if (ctx->first_pts == AV_NOPTS_VALUE && pkt->pts != AV_NOPTS_VALUE)
++            ctx->first_pts = pkt->pts;
++        if (ctx->first_pts != AV_NOPTS_VALUE) {
++            if (pkt->pts != AV_NOPTS_VALUE)
++                pkt->pts -= ctx->first_pts;
++            if (pkt->dts != AV_NOPTS_VALUE)
++                pkt->dts -= ctx->first_pts;
++        }
++    }
++
++    return err;
++}
++
++static int64_t mmttlv_scan_last_ts(AVFormatContext *s, int64_t pos, int64_t pos_limit, int *stream_index_found)
++{
++    struct MMTTLVContext *ctx = s->priv_data;
++    int64_t last_valid_ts = AV_NOPTS_VALUE;
++    int last_valid_stream_index = -1;
++    size_t saved_resync = ctx->resync_size;
++    AVPacket *pkt;
++    int ret;
++
++    pkt = av_packet_alloc();
++    if (!pkt)
++        return AV_NOPTS_VALUE;
++
++    if (avio_seek(s->pb, pos, SEEK_SET) < 0) {
++        av_packet_free(&pkt);
++        return AV_NOPTS_VALUE;
++    }
++
++    ctx->last_pos = -1; // force resync
++    ctx->resync_size = 65536 + 4096; // Allow larger resync window for random access
++
++    while (avio_tell(s->pb) < pos_limit) {
++        av_packet_unref(pkt);
++        ret = mmttlv_read_packet(s, pkt);
++        if (ret >= 0) {
++            if (pkt->pts != AV_NOPTS_VALUE) {
++                last_valid_ts = pkt->pts;
++                last_valid_stream_index = pkt->stream_index;
++            }
++            av_packet_unref(pkt);
++        } else if (ret == AVERROR_EOF) {
++            break;
++        } else if (ret == FFERROR_REDO) {
++            continue;
++        } else {
++            // Skip invalid packets during search
++            continue;
++        }
+     }
++
++    av_packet_free(&pkt);
++    ctx->resync_size = saved_resync; // restore; otherwise normal playback runs with the wide window
++    if (stream_index_found) *stream_index_found = last_valid_stream_index;
++    return last_valid_ts;
+ }
+ 
+ static int mmttlv_read_header(AVFormatContext *s)
+@@ -301,6 +391,9 @@ static int mmttlv_read_header(AVFormatContext *s)
+     int64_t              pos;
+     int64_t              allow = s->probesize;
+     struct MMTTLVContext *ctx  = s->priv_data;
++    AVPacket             *pkt;
++    int64_t              file_size;
++    int                  ret;
+ 
+     ctx->last_pos = avio_tell(s->pb);
+     if (ctx->last_pos < 0)
+@@ -308,6 +401,7 @@ static int mmttlv_read_header(AVFormatContext *s)
+     ctx->last_pos -= 1; // force resync
+ 
+     ctx->resync_size = 4096;
++    ctx->first_pts   = AV_NOPTS_VALUE;
+     s->ctx_flags |= AVFMTCTX_NOHEADER;
+ 
+     if (!s->pb->seekable)
+@@ -323,13 +417,50 @@ static int mmttlv_read_header(AVFormatContext *s)
+         allow -= ctx->last_pos - cur;
+     }
+ 
+-    ctx->last_pos = avio_tell(s->pb);
+-    if (ctx->last_pos < 0)
+-        return (int) ctx->last_pos;
++    pkt = av_packet_alloc();
++    if (!pkt)
++        return AVERROR(ENOMEM);
++
++    // Read until the first timestamped packet; mmttlv_read_packet() anchors
++    // first_pts on it (it must not be re-assigned here to the already-normalized
++    // value the read returns).
++    while (ctx->first_pts == AV_NOPTS_VALUE) {
++        av_packet_unref(pkt);
++        ret = mmttlv_read_packet(s, pkt);
++        if (ret < 0) {
++            if (ret == AVERROR_EOF || ret == FFERROR_REDO)
++                break;
++            av_packet_free(&pkt);
++            return ret;
++        }
++    }
++    av_packet_free(&pkt);
++
++    if (ctx->first_pts != AV_NOPTS_VALUE && (file_size = avio_size(s->pb)) > 0) {
++        // Estimate duration from the last MPU timestamp, scanning only the trailing 32 MB so open()
++        // stays cheap on multi-GB files.
++        int64_t last_pos = FFMAX(0, file_size - 32 * 1024 * 1024);
++        int stream_index_found = -1;
++        int64_t last_ts = mmttlv_scan_last_ts(s, last_pos, file_size, &stream_index_found);
++        if (last_ts != AV_NOPTS_VALUE && stream_index_found >= 0 && stream_index_found < s->nb_streams) {
++            AVStream *st = s->streams[stream_index_found];
++            if (st->time_base.den > 0) {
++                s->duration = av_rescale_q(last_ts, st->time_base, AV_TIME_BASE_Q);
++            } else {
++                s->duration = last_ts;
++            }
++        }
++    }
+ 
+-    if ((pos = avio_seek(s->pb, pos, SEEK_SET)) < 0)
++    // Reset to beginning and reset MMT state machine
++    if (avio_seek(s->pb, 0, SEEK_SET) < 0)
+         return (int) pos;
+ 
++    ctx->last_pos = -1; // force resync after seek
++    for (struct Program *program = ctx->programs;
++         program != NULL; program = program->next)
++        ff_mmtp_reset_state(program->mmtp);
++
+     return 0;
+ }
+ 
+@@ -349,14 +480,22 @@ static int mmttlv_read_close(AVFormatContext *ctx)
+     return 0;
+ }
+ 
++// Timestamp of the next video access unit at or after *pos, for ff_seek_frame_binary().
++// A probe may land inside a large HEVC access unit, so widen the resync window (a
++// video TLV fragment can exceed the default), reset state on entry so probes are
++// independent, and skip past a failed resync rather than failing the whole seek.
+ static int64_t mmttlv_read_timestamp(
+     struct AVFormatContext *s, int stream_index,
+     int64_t *pos, int64_t pos_limit)
+ {
+     struct MMTTLVContext *ctx = s->priv_data;
++    size_t  saved_resync = ctx->resync_size;
++    int64_t result = AV_NOPTS_VALUE;
+ 
+     if ((*pos = avio_seek(s->pb, *pos, SEEK_SET)) < 0)
+-        return (int) *pos;
++        return *pos;
++    ctx->resync_size = 65536 + 4096;
++    ctx->last_pos    = -1; // force a clean resync + state reset at the probe
+ 
+     while (pos_limit > 0) {
+         AVPacket      packet = {0};
+@@ -365,17 +504,36 @@ static int64_t mmttlv_read_timestamp(
+         const int64_t off    = packet.pos;
+         const int     sid    = packet.stream_index;
+         av_packet_unref(&packet);
+-        if (err >= 0 && (stream_index < 0 || sid == stream_index)) {
+-            *pos = off;
+-            return ts;
++
++        if (err == AVERROR_EOF)
++            break;
++
++        if (err >= 0 && ts != AV_NOPTS_VALUE &&
++            (stream_index < 0 || sid == stream_index)) {
++            *pos   = off;
++            result = ts;
++            break;
+         }
++
++        if (err < 0 && err != FFERROR_REDO) {
++            // bad sync — advance one byte and resync again, staying in budget
++            const int64_t here = avio_tell(s->pb);
++            if (here < 0)
++                break;
++            pos_limit -= (here + 1) - *pos;
++            *pos          = here + 1;
++            if (avio_seek(s->pb, *pos, SEEK_SET) < 0)
++                break;
++            ctx->last_pos = -1;
++            continue;
++        }
++
+         pos_limit -= ctx->last_pos - *pos;
+         *pos = ctx->last_pos;
+-        if (err < 0 && err != FFERROR_REDO)
+-            return AV_NOPTS_VALUE;
+     }
+ 
+-    return AV_NOPTS_VALUE;
++    ctx->resync_size = saved_resync;
++    return result;
+ }
+ 
+ #if CONFIG_MMTTLV_DEMUXER
+@@ -383,7 +541,7 @@ const FFInputFormat ff_mmttlv_demuxer = {
+     .p.name         = "mmttlv",
+     .p.long_name    = NULL_IF_CONFIG_SMALL(
+         "MMT protocol over TLV packets (ARIB STD-B32)"),
+-    .p.flags        = AVFMT_SHOW_IDS,
++    .p.flags        = AVFMT_SHOW_IDS | AVFMT_GENERIC_INDEX,
+     .priv_data_size = sizeof(struct MMTTLVContext),
+     .flags_internal = FF_INFMT_FLAG_INIT_CLEANUP,
+     .read_probe     = mmttlv_probe,
+@@ -391,5 +549,6 @@ const FFInputFormat ff_mmttlv_demuxer = {
+     .read_packet    = mmttlv_read_packet,
+     .read_close     = mmttlv_read_close,
+     .read_timestamp = mmttlv_read_timestamp,
++    .read_seek      = ff_seek_frame_binary,
+ };
+ #endif
+-- 
+2.39.1
+

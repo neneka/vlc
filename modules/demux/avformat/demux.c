@@ -108,6 +108,52 @@ static block_t *BuildSsaFrame( const AVPacket *p_pkt, unsigned i_order );
 static void UpdateSeekPoint( demux_t *p_demux, vlc_tick_t i_time );
 static void ResetTime( demux_t *p_demux, int64_t i_time );
 
+/* Keep FFmpeg's program metadata in the VLC program/group namespace. */
+static void UpdateProgramMetadata( demux_t *p_demux )
+{
+    demux_sys_t *p_sys = p_demux->p_sys;
+    for( unsigned i = 0; i < p_sys->ic->nb_programs; i++ )
+    {
+        const AVProgram *program = p_sys->ic->programs[i];
+        if( program == NULL )
+            continue;
+
+        vlc_meta_t *meta = vlc_meta_New();
+        if( meta == NULL )
+            continue;
+        const AVDictionaryEntry *entry;
+        entry = av_dict_get( program->metadata, "title", NULL, 0 );
+        if( entry && entry->value && IsUTF8( entry->value ) )
+            vlc_meta_Set( meta, vlc_meta_ESNowPlaying, entry->value );
+        else
+            vlc_meta_Set( meta, vlc_meta_ESNowPlaying, "" );
+        entry = av_dict_get( program->metadata, "description", NULL, 0 );
+        if( entry && entry->value && IsUTF8( entry->value ) )
+            vlc_meta_Set( meta, vlc_meta_Description, entry->value );
+        else
+            vlc_meta_Set( meta, vlc_meta_Description, "" );
+        entry = av_dict_get( program->metadata, "language", NULL, 0 );
+        if( entry && entry->value && IsUTF8( entry->value ) )
+            vlc_meta_Set( meta, vlc_meta_Language, entry->value );
+        else
+            vlc_meta_Set( meta, vlc_meta_Language, "" );
+        es_out_Control( p_demux->out, ES_OUT_SET_GROUP_META, program->id, meta );
+        vlc_meta_Delete( meta );
+    }
+}
+
+static int StreamProgramId( const AVFormatContext *ic, unsigned stream_index )
+{
+    for( unsigned i = 0; i < ic->nb_programs; i++ )
+    {
+        const AVProgram *program = ic->programs[i];
+        for( unsigned j = 0; program && j < program->nb_stream_indexes; j++ )
+            if( program->stream_index[j] == stream_index )
+                return program->id;
+    }
+    return 0;
+}
+
 static vlc_fourcc_t CodecTagToFourcc( uint32_t codec_tag )
 {
     // convert from little-endian avcodec codec_tag to VLC native-endian fourcc
@@ -727,6 +773,7 @@ int avformat_OpenDemux( vlc_object_t *p_this )
             }
 
             es_fmt.i_id = i;
+            es_fmt.i_group = StreamProgramId( p_sys->ic, i );
             p_track->p_es = es_out_Add( p_demux->out, &es_fmt );
             if( p_track->p_es != NULL )
                 es_format_Copy( &p_track->es_format, &es_fmt );
@@ -738,6 +785,9 @@ int avformat_OpenDemux( vlc_object_t *p_this )
         }
         es_format_Clean( &es_fmt );
     }
+
+    UpdateProgramMetadata( p_demux );
+    p_sys->ic->event_flags &= ~AVFMT_EVENT_FLAG_METADATA_UPDATED;
 
     if( p_sys->ic->start_time != (int64_t)AV_NOPTS_VALUE )
         i_start_time = FROM_AV_TS_NZ(p_sys->ic->start_time);
@@ -821,6 +871,11 @@ static int Demux( demux_t *p_demux )
 
     /* Read a frame */
     int i_av_ret = av_read_frame( p_sys->ic, &pkt );
+    if( p_sys->ic->event_flags & AVFMT_EVENT_FLAG_METADATA_UPDATED )
+    {
+        UpdateProgramMetadata( p_demux );
+        p_sys->ic->event_flags &= ~AVFMT_EVENT_FLAG_METADATA_UPDATED;
+    }
     if( i_av_ret )
     {
         /* Avoid EOF if av_read_frame returns AVERROR(EAGAIN) */

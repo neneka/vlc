@@ -1,0 +1,36 @@
+From f7480a7c44783965367f0988dd6f24370ff1834e Mon Sep 17 00:00:00 2001
+From: Rainbaby <rainbaby@outlook.jp>
+Date: Sun, 26 Jul 2026 06:57:27 +0900
+Subject: [PATCH 9/9] avformat/mmtp: include network.h instead of
+ <netinet/in.h>
+
+mmtp.c needs struct in_addr / in6_addr for the compressed-IP header layouts.
+<netinet/in.h> does not exist on mingw, so the build fails there:
+
+  libavformat/mmtp.c:31:10: fatal error: netinet/in.h: No such file or directory
+
+libavformat/network.h is the portable wrapper for exactly this (winsock2.h on
+Windows, netinet/in.h on POSIX) and is what this file included before the series
+was rewritten. Restore it.
+
+Signed-off-by: Rainbaby <rainbaby@outlook.jp>
+---
+ libavformat/mmtp.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libavformat/mmtp.c b/libavformat/mmtp.c
+index 43cd495035..ef7e956839 100644
+--- a/libavformat/mmtp.c
++++ b/libavformat/mmtp.c
+@@ -28,7 +28,7 @@
+ #include "demux.h"
+ #include "internal.h"
+ #include "mmtp.h"
+-#include <netinet/in.h>
++#include "network.h"
+ 
+ struct MMTGeneralLocationInfo {
+     uint8_t location_type;
+-- 
+2.39.1
+

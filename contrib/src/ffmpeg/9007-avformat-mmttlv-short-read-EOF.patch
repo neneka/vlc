@@ -1,0 +1,58 @@
+From d295593171a2f333ec8a7cfa0b2af1b891b0cb29 Mon Sep 17 00:00:00 2001
+From: Rainbaby <rainbaby@outlook.jp>
+Date: Sun, 26 Jul 2026 06:14:16 +0900
+Subject: [PATCH 6/9] avformat/mmttlv: report EOF on a short read while
+ resyncing
+
+avio_read() returns a SHORT count at end of file without returning an error, so
+the resync scan accepted it as success and kept hunting with stale `header`
+bytes. Near EOF that never terminates: the scan reads short, seeks back 3, reads
+short again, and neither advances nor reports EOF.
+
+That deadlocks seeking, because ff_seek_frame_binary() -> ff_find_last_ts()
+probes the LAST 1 KB first (pos_max = filesize-1-1024, doubling the step until a
+timestamp turns up). The probe never returns, so the search never even starts:
+the player sits at the requested position with an empty packet queue and no
+error. It reproduces in mpv (its own AVIOContext returns the short read at EOF
+where the file protocol reports the error), on a capture whose tail holds no
+complete TLV packet, and only for the affected files -- which is why it looked
+like seeking failed for 'some' videos.
+
+Require the full header, and map a short read at EOF to AVERROR_EOF.
+
+Signed-off-by: Rainbaby <rainbaby@outlook.jp>
+---
+ libavformat/mmttlv.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/libavformat/mmttlv.c b/libavformat/mmttlv.c
+index 8cfab1929e..497dd1b247 100644
+--- a/libavformat/mmttlv.c
++++ b/libavformat/mmttlv.c
+@@ -217,8 +217,10 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+             if ((err = ffio_ensure_seekback(s->pb, 4)) < 0)
+                 return err;
+ 
+-            if ((err = avio_read(s->pb, header, 4)) < 0)
+-                return avio_feof(s->pb) ? AVERROR_EOF : err;
++            // A short read is not an error from avio_read, but there is no whole TLV header
++            // left — report EOF instead of scanning on with stale `header` bytes.
++            if ((err = avio_read(s->pb, header, 4)) != 4)
++                return (err < 0 && !avio_feof(s->pb)) ? err : AVERROR_EOF;
+ 
+             if (header[0] != HEADER_BYTE) {
+                 if ((pos = avio_seek(s->pb, -3, SEEK_CUR)) < 0)
+@@ -237,8 +239,8 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+             if ((pos = avio_skip(s->pb, 4 + size)) < 0)
+                 return (int) pos;
+ 
+-            if ((err = avio_read(s->pb, header, 1)) < 0)
+-                return avio_feof(s->pb) ? AVERROR_EOF : err;
++            if ((err = avio_read(s->pb, header, 1)) != 1)
++                return (err < 0 && !avio_feof(s->pb)) ? err : AVERROR_EOF;
+ 
+             if (header[0] == HEADER_BYTE) {
+                 // found HEADER, [size], HEADER, should be good
+-- 
+2.39.1
+

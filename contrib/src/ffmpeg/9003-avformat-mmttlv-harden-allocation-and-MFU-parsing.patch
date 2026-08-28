@@ -1,0 +1,113 @@
+From 373231040fe73313eb8e572387ce828d43e56961 Mon Sep 17 00:00:00 2001
+From: Rainbaby <rainbaby@outlook.jp>
+Date: Fri, 3 Jul 2026 22:14:02 +0900
+Subject: [PATCH 2/9] avformat/mmttlv: harden allocation and MFU parsing
+
+Faults on live and multi-gigabyte captures: av_malloc failures returned
+AVERROR(errno), which av_malloc never sets, and an unchecked parse context was
+dereferenced; an MFU carrying several frames aborted the demux; and MFU payloads
+reached the codec parser without AV_INPUT_BUFFER_PADDING_SIZE, so
+ff_combine_frame read past the buffer and grew it without bound.
+
+Signed-off-by: Rainbaby <rainbaby@outlook.jp>
+---
+ libavformat/mmtp.c   | 19 ++++++++++++++++---
+ libavformat/mmttlv.c | 20 +++++++++++++++-----
+ 2 files changed, 31 insertions(+), 8 deletions(-)
+
+diff --git a/libavformat/mmtp.c b/libavformat/mmtp.c
+index da198953cf..5939d67ac0 100644
+--- a/libavformat/mmtp.c
++++ b/libavformat/mmtp.c
+@@ -1400,7 +1400,14 @@ emit_packet(MMTPContext *ctx, struct Streams *st, uint8_t *data, int size)
+         }
+         st->parser->fetch_timestamp = true;
+ 
+-        av_assert0(ctx->pkt->data == NULL);
++        // An MFU carries a single access unit, so the parser should yield one frame per read; if a
++        // non-conformant MFU yields more, keep the first and warn rather than aborting on an assert.
++        if (ctx->pkt->data != NULL) {
++            av_log(ctx->s, AV_LOG_WARNING,
++                   "pid 0x%04x: parser produced more than one frame for a single MFU; "
++                   "dropping the extra frame\n", ctx->current_pid);
++            break;
++        }
+         ctx->pkt->data = (uint8_t *) out_data;
+         ctx->pkt->size = out_size;
+ 
+@@ -1430,22 +1437,28 @@ static int consume_mfu(MMTPContext *ctx, GetByteContext *gbc)
+     case AV_CODEC_ID_HEVC:
+         size = bytestream2_get_be32(gbc);
+         if (size != bytestream2_get_bytes_left(gbc)) return AVERROR_INVALIDDATA;
+-        if ((buf = av_malloc(size + 3)) == NULL) return AVERROR(ENOMEM);
++        // ff_combine_frame reads AV_INPUT_BUFFER_PADDING_SIZE bytes past the data, so allocate
++        // and zero that padding; otherwise it reads adjacent heap.
++        if ((buf = av_malloc(size + 3 + AV_INPUT_BUFFER_PADDING_SIZE)) == NULL)
++            return AVERROR(ENOMEM);
+         buf[0] = 0x00;
+         buf[1] = 0x00;
+         buf[2] = 0x01;
+         bytestream2_get_bufferu(gbc, buf + 3, size);
++        memset(buf + 3 + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+         err = emit_packet(ctx, st, buf, size + 3);
+         av_free(buf);
+         return err;
+     case AV_CODEC_ID_AAC_LATM:
+         size = bytestream2_get_bytes_left(gbc);
+         if (size >> 13) return AVERROR(EOVERFLOW);
+-        if ((buf = av_malloc(size + 3)) == NULL) return AVERROR(ENOMEM);
++        if ((buf = av_malloc(size + 3 + AV_INPUT_BUFFER_PADDING_SIZE)) == NULL)
++            return AVERROR(ENOMEM);
+         buf[0] = 0x56;
+         buf[1] = 0xe0 | (size >> 8);
+         buf[2] = size & 0xff;
+         bytestream2_get_bufferu(gbc, buf + 3, size);
++        memset(buf + 3 + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+         err = emit_packet(ctx, st, buf, size + 3);
+         av_free(buf);
+         return err;
+diff --git a/libavformat/mmttlv.c b/libavformat/mmttlv.c
+index 04695a37ae..7a500e75ce 100644
+--- a/libavformat/mmttlv.c
++++ b/libavformat/mmttlv.c
+@@ -162,12 +162,18 @@ static int mmttlv_read_compressed_ip_packet(
+ 
+     if (program == NULL) {
+         AVProgram *p = av_new_program(s, context_id);
+-        if (p == NULL) return AVERROR(errno);
++        if (p == NULL) return AVERROR(ENOMEM);
+ 
+         program = av_malloc(sizeof(struct Program));
+-        if (program == NULL) return AVERROR(errno);
++        if (program == NULL) return AVERROR(ENOMEM);
+ 
++        // av_malloc does not set errno; and an unchecked NULL mmtp would be dereferenced by
++        // ff_mmtp_parse_packet below.
+         program->mmtp = ff_mmtp_parse_open(p);
++        if (program->mmtp == NULL) {
++            av_free(program);
++            return AVERROR(ENOMEM);
++        }
+         program->next = ctx->programs;
+         ctx->programs = program;
+         program->cid  = context_id;
+@@ -268,9 +274,13 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+     }
+ 
+     if (ctx->cap < size) {
+-        av_free(ctx->buf);
+-        if ((ctx->buf = av_malloc(ctx->cap = size)) == NULL)
+-            return AVERROR(errno);
++        // Reset cap to 0 before allocating: on failure buf is NULL, and a stale cap == size would
++        // make a later call skip the realloc and read into NULL.
++        av_freep(&ctx->buf);
++        ctx->cap = 0;
++        if ((ctx->buf = av_malloc(size)) == NULL)
++            return AVERROR(ENOMEM);
++        ctx->cap = size;
+     }
+     if ((err = ffio_read_size(s->pb, ctx->buf, size)) < 0)
+         return avio_feof(s->pb) ? AVERROR_EOF : err;
+-- 
+2.39.1
+

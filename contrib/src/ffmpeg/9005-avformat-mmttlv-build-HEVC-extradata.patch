@@ -1,0 +1,132 @@
+From 727eaa4dcd4491a9f7adcb8c763e888698d3ed69 Mon Sep 17 00:00:00 2001
+From: Rainbaby <rainbaby@outlook.jp>
+Date: Fri, 3 Jul 2026 22:19:25 +0900
+Subject: [PATCH 4/9] avformat/mmttlv: build HEVC extradata from in-band
+ parameter sets
+
+The MFU stream carries VPS/SPS/PPS in-band only, so the HEVC decoder loses them
+across a seek or flush. Capture the parameter-set NALs and expose them as
+Annex-B codecpar->extradata, rebuilding it whenever a set changes.
+
+Signed-off-by: Rainbaby <rainbaby@outlook.jp>
+---
+ libavformat/mmtp.c | 79 ++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 79 insertions(+)
+
+diff --git a/libavformat/mmtp.c b/libavformat/mmtp.c
+index ec5d89d575..23ed106a54 100644
+--- a/libavformat/mmtp.c
++++ b/libavformat/mmtp.c
+@@ -152,9 +152,22 @@ struct Streams {
+     int64_t  offset;
+     int      flags;
+ 
++    // VPS/SPS/PPS captured from the MFUs (raw NALs), used to build extradata;
++    // the parameter sets are otherwise in-band only. [0]=VPS [1]=SPS [2]=PPS.
++    struct {
++        uint8_t *data;
++        int      size;
++    } hevc_ps[3];
++
+     struct Streams *next;
+ };
+ 
++enum {
++    HEVC_NAL_VPS = 32,
++    HEVC_NAL_SPS = 33,
++    HEVC_NAL_PPS = 34,
++};
++
+ struct MMTPContext {
+     struct FragmentAssembler *assembler;
+     struct Streams           *streams;
+@@ -1361,6 +1374,68 @@ static int emit_closed_caption_mfu(MMTPContext *ctx, struct Streams *st,
+     return 0;
+ }
+ 
++// Build extradata as an Annex-B VPS+SPS+PPS blob, once all three are known.
++static void hevc_rebuild_extradata(struct Streams *st)
++{
++    static const uint8_t start_code[4] = { 0, 0, 0, 1 };
++    AVCodecParameters *par = st->stream->codecpar;
++    int      i, total = 0;
++    uint8_t *ed, *p;
++
++    for (i = 0; i < 3; i++) {
++        if (st->hevc_ps[i].data == NULL)
++            return; // wait until VPS + SPS + PPS have all been seen
++        total += sizeof(start_code) + st->hevc_ps[i].size;
++    }
++
++    ed = av_malloc(total + AV_INPUT_BUFFER_PADDING_SIZE);
++    if (ed == NULL)
++        return;
++    for (i = 0, p = ed; i < 3; i++) {
++        memcpy(p, start_code, sizeof(start_code));
++        p += sizeof(start_code);
++        memcpy(p, st->hevc_ps[i].data, st->hevc_ps[i].size);
++        p += st->hevc_ps[i].size;
++    }
++    memset(p, 0, AV_INPUT_BUFFER_PADDING_SIZE);
++
++    av_freep(&par->extradata);
++    par->extradata      = ed;
++    par->extradata_size = total;
++}
++
++// Keep a copy of each parameter-set NAL, rebuilding extradata when one changes.
++static void hevc_capture_parameter_set(struct Streams *st,
++                                       const uint8_t *nal, int nal_size)
++{
++    uint8_t *copy;
++    int      idx;
++
++    if (nal_size < 2)
++        return;
++    switch ((nal[0] >> 1) & 0x3f) {
++    case HEVC_NAL_VPS: idx = 0; break;
++    case HEVC_NAL_SPS: idx = 1; break;
++    case HEVC_NAL_PPS: idx = 2; break;
++    default:           return;
++    }
++
++    if (st->hevc_ps[idx].data != NULL &&
++        st->hevc_ps[idx].size == nal_size &&
++        memcmp(st->hevc_ps[idx].data, nal, nal_size) == 0)
++        return; // already captured, unchanged
++
++    copy = av_malloc(nal_size);
++    if (copy == NULL)
++        return;
++    memcpy(copy, nal, nal_size);
++    av_free(st->hevc_ps[idx].data);
++    st->hevc_ps[idx].data = copy;
++    st->hevc_ps[idx].size = nal_size;
++
++    hevc_rebuild_extradata(st);
++}
++
+ static int
+ emit_packet(MMTPContext *ctx, struct Streams *st, uint8_t *data, int size)
+ {
+@@ -1447,6 +1522,7 @@ static int consume_mfu(MMTPContext *ctx, GetByteContext *gbc)
+         buf[2] = 0x01;
+         bytestream2_get_bufferu(gbc, buf + 3, size);
+         memset(buf + 3 + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
++        hevc_capture_parameter_set(st, buf + 3, size);
+         err = emit_packet(ctx, st, buf, size + 3);
+         av_free(buf);
+         return err;
+@@ -1712,6 +1788,9 @@ void ff_mmtp_parse_close(MMTPContext *ctx)
+         if (streams->parser != NULL) av_parser_close(streams->parser);
+         av_free(streams->timestamp_descriptor);
+         av_free(streams->ext_timestamp_descriptor);
++        av_free(streams->hevc_ps[0].data);
++        av_free(streams->hevc_ps[1].data);
++        av_free(streams->hevc_ps[2].data);
+         av_free(streams);
+         streams = next;
+     }
+-- 
+2.39.1
+

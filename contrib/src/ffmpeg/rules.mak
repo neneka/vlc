@@ -253,6 +253,17 @@ ffmpeg: ffmpeg-$(FFMPEG_VERSION).tar.xz .sum-ffmpeg
 	$(APPLY) $(SRC)/ffmpeg/avcodec-fix-compilation-visionos.patch
 	$(APPLY) $(SRC)/ffmpeg/avcodec-enable-audiotoolbox-ac3.patch
 	$(APPLY) $(SRC)/ffmpeg/9000-avformat-add-MMTP-parser-and-MMT-TLV-demuxer.patch
+	$(APPLY) $(SRC)/ffmpeg/9001-avformat-mmttlv-fix-hang.patch
+	$(APPLY) $(SRC)/ffmpeg/9002-avformat-mmttlv-saindriches-superfashi-diff.patch
+	$(APPLY) $(SRC)/ffmpeg/9003-avformat-mmttlv-harden-allocation-and-MFU-parsing.patch
+	$(APPLY) $(SRC)/ffmpeg/9004-avformat-mmttlv-seekable-byte-index-with-robust-timestamp.patch
+	$(APPLY) $(SRC)/ffmpeg/9005-avformat-mmttlv-build-HEVC-extradata.patch
+	$(APPLY) $(SRC)/ffmpeg/9006-avformat-mmttlv-expose-program-and-audio-track-metadata.patch
+	$(APPLY) $(SRC)/ffmpeg/9007-avformat-mmttlv-short-read-EOF.patch
+	$(APPLY) $(SRC)/ffmpeg/9008-avformat-mmttlv-read-timestamp-pos-limit.patch
+	$(APPLY) $(SRC)/ffmpeg/9009-avformat-mmttlv-post-seek-resync.patch
+	$(APPLY) $(SRC)/ffmpeg/9010-avformat-mmtp-network-header.patch
+	$(APPLY) $(SRC)/ffmpeg/9011-avformat-mmtp-vlc-program-metadata-events.patch
 	$(MOVE)
 
 .ffmpeg: ffmpeg

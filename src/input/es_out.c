@@ -1604,6 +1604,24 @@ static bool EsOutIsProgramVisible(es_out_sys_t *p_sys, input_source_t *source, i
             p_sys->p_pgrm && p_sys->p_pgrm->source == source);
 }
 
+/* Apply the selected program's metadata to the input item.  Program metadata
+ * is deliberately applied as a complete set so switching programs also clears
+ * values that only existed on the previous program. */
+static void EsOutUpdateSelectedProgramMeta(es_out_sys_t *p_sys,
+                                           const es_out_pgrm_t *p_pgrm)
+{
+    input_item_t *p_item = input_priv(p_sys->p_input)->p_item;
+    const vlc_meta_t *meta = p_pgrm ? p_pgrm->p_meta : NULL;
+
+    input_item_SetESNowPlaying( p_item, meta ? vlc_meta_Get(meta, vlc_meta_ESNowPlaying) : NULL );
+    input_item_SetTitle( p_item, meta ? vlc_meta_Get(meta, vlc_meta_Title) : NULL );
+    input_item_SetMeta( p_item, vlc_meta_Description,
+                        meta ? vlc_meta_Get(meta, vlc_meta_Description) : NULL );
+    input_item_SetMeta( p_item, vlc_meta_Language,
+                        meta ? vlc_meta_Get(meta, vlc_meta_Language) : NULL );
+    input_item_SetPublisher( p_item, meta ? vlc_meta_Get(meta, vlc_meta_Publisher) : NULL );
+}
+
 /* EsOutProgramSelect:
  *  Select a program and update the object variable
  */
@@ -1681,18 +1699,8 @@ static void EsOutProgramSelect(es_out_sys_t *p_sys, es_out_pgrm_t *p_pgrm)
     /* Ensure the correct running EPG table is selected */
     input_item_ChangeEPGSource( input_priv(p_input)->p_item, p_pgrm->i_id );
 
-    /* Update now playing */
-    if( p_pgrm->p_meta )
-    {
-        input_item_SetESNowPlaying( input_priv(p_input)->p_item,
-                                    vlc_meta_Get( p_pgrm->p_meta, vlc_meta_ESNowPlaying ) );
-        input_item_SetPublisher( input_priv(p_input)->p_item,
-                                 vlc_meta_Get( p_pgrm->p_meta, vlc_meta_Publisher ) );
-        input_item_SetTitle( input_priv(p_input)->p_item,
-                             vlc_meta_Get( p_pgrm->p_meta, vlc_meta_Title ) );
-        input_SendEventMeta( p_input );
-        /* FIXME: we probably want to replace every input meta */
-    }
+    EsOutUpdateSelectedProgramMeta( p_sys, p_pgrm );
+    input_SendEventMeta( p_input );
 }
 
 /* EsOutAddProgram:
@@ -1894,6 +1902,8 @@ static void EsOutProgramMeta(es_out_sys_t *p_sys, input_source_t *source,
     if( !vlc_meta_Get( p_meta, vlc_meta_Title) &&
         !vlc_meta_Get( p_meta, vlc_meta_ESNowPlaying) &&
         !vlc_meta_Get( p_meta, vlc_meta_Publisher) &&
+        !vlc_meta_Get( p_meta, vlc_meta_Description) &&
+        !vlc_meta_Get( p_meta, vlc_meta_Language) &&
         vlc_meta_GetExtraCount( p_meta ) == 0 )
     {
         return;
@@ -1937,6 +1947,7 @@ static void EsOutProgramMeta(es_out_sys_t *p_sys, input_source_t *source,
 
     if( p_sys->p_pgrm == p_pgrm )
     {
+        EsOutUpdateSelectedProgramMeta( p_sys, p_pgrm );
         EsOutMeta(p_sys, NULL, p_meta);
     }
     /* */
@@ -2134,6 +2145,7 @@ static void EsOutProgramEpg(es_out_sys_t *p_sys, input_source_t *source,
     if( p_pgrm->p_meta )
     {
         vlc_meta_Set( p_pgrm->p_meta, vlc_meta_ESNowPlaying, psz_name );
+        vlc_meta_Set( p_pgrm->p_meta, vlc_meta_Description, psz_short_desc );
 
         char psz_event_start[32];
         char psz_event_duration[32];
@@ -2178,6 +2190,7 @@ static void EsOutProgramEpg(es_out_sys_t *p_sys, input_source_t *source,
     /* Update selected program input info */
     if( p_pgrm == p_sys->p_pgrm )
     {
+        EsOutUpdateSelectedProgramMeta( p_sys, p_pgrm );
         input_item_SetMetaExtra( input_priv(p_input)->p_item, "ServiceId",
                                  p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "ServiceId" ) : NULL );
         input_item_SetMetaExtra( input_priv(p_input)->p_item, "ServiceName",
