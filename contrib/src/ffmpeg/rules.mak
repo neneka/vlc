@@ -264,6 +264,9 @@ ffmpeg: ffmpeg-$(FFMPEG_VERSION).tar.xz .sum-ffmpeg
 	$(APPLY) $(SRC)/ffmpeg/9009-avformat-mmttlv-post-seek-resync.patch
 	$(APPLY) $(SRC)/ffmpeg/9010-avformat-mmtp-network-header.patch
 	$(APPLY) $(SRC)/ffmpeg/9011-avformat-mmtp-vlc-program-metadata-events.patch
+	$(APPLY) $(SRC)/ffmpeg/9012-avformat-mmtp-mh-service-event-and-tot-metadata.patch
+	$(APPLY) $(SRC)/ffmpeg/9013-avformat-mmttlv-derive-service-and-media-zero-network-time.patch
+	$(APPLY) $(SRC)/ffmpeg/9014-avformat-mmtp-fix-mh-sdt-service-loop.patch
 	$(MOVE)
 
 .ffmpeg: ffmpeg

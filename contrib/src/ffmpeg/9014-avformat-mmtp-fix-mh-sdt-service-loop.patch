@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci7lus <7887955+ci7lus@users.noreply.github.com>
+Date: Sun, 30 Aug 2026 00:00:00 +0900
+Subject: [PATCH] avformat/mmtp: fix MH-SDT service loop layout
+
+The MH-SDT service loop contains an EIT flags byte between service_id and
+running_status/free_CA_mode/descriptors_loop_length.  Consume that byte and
+require the complete five-byte service header so the descriptor loop is
+started at the correct offset.
+---
+ libavformat/mmtp.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/libavformat/mmtp.c b/libavformat/mmtp.c
+index c057ed772d53a5c1de105c0909a55ad2f30d4773..8f3b1b3e03b57c99a9938d8350cf985611be54a2 100644
+--- a/libavformat/mmtp.c
++++ b/libavformat/mmtp.c
+@@ -958,7 +958,8 @@ static int parse_mh_sdt_table(MMTPContext *ctx, GetByteContext *gbc)
+-        while (bytestream2_get_bytes_left(&ngbc) >= 4) {
++        while (bytestream2_get_bytes_left(&ngbc) >= 5) {
+             uint16_t service_id = bytestream2_get_be16u(&ngbc);
+-            uint16_t flags_length = bytestream2_get_be16u(&ngbc);
+-            uint16_t descriptors_length = flags_length & 0x0fff;
++            bytestream2_skipu(&ngbc, 1); /* EIT flags */
++            uint16_t status_and_length = bytestream2_get_be16u(&ngbc);
++            uint16_t descriptors_length = status_and_length & 0x0fff;
+             GetByteContext dgbc;
+             if (bytestream2_get_bytes_left(&ngbc) < descriptors_length)
+                 return AVERROR_INVALIDDATA;

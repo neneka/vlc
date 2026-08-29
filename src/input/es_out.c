@@ -2147,9 +2147,18 @@ static void EsOutProgramEpg(es_out_sys_t *p_sys, input_source_t *source,
         vlc_meta_Set( p_pgrm->p_meta, vlc_meta_ESNowPlaying, psz_name );
         vlc_meta_Set( p_pgrm->p_meta, vlc_meta_Description, psz_short_desc );
 
+        char psz_event_id[16];
         char psz_event_start[32];
         char psz_event_duration[32];
 
+        if( p_current != NULL )
+        {
+            snprintf( psz_event_id, sizeof(psz_event_id), "%"PRIu16,
+                      p_current->i_id );
+            vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventId", psz_event_id );
+        }
+        else
+            vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventId", NULL );
         vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventName", psz_name );
         vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventDesc", psz_short_desc );
         if( p_current != NULL )
@@ -2165,7 +2174,10 @@ static void EsOutProgramEpg(es_out_sys_t *p_sys, input_source_t *source,
         {
             vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventStartAt", NULL );
             vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventDuration", NULL );
-    }
+            vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventLanguage", NULL );
+            vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventRunningStatus", NULL );
+            vlc_meta_SetExtra( p_pgrm->p_meta, "PresentEventFreeCA", NULL );
+        }
         vlc_meta_SetDate( p_pgrm->p_meta, NULL );
 
         EsOutMetaClearPrefixedExtras( p_pgrm->p_meta, ARIB_META_EXTRA_PREFIX );
@@ -2195,8 +2207,22 @@ static void EsOutProgramEpg(es_out_sys_t *p_sys, input_source_t *source,
                                  p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "ServiceId" ) : NULL );
         input_item_SetMetaExtra( input_priv(p_input)->p_item, "ServiceName",
                                  p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "ServiceName" ) : NULL );
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "ServiceProvider",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "ServiceProvider" ) : NULL );
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "ServiceType",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "ServiceType" ) : NULL );
         input_item_SetMetaExtra( input_priv(p_input)->p_item, "ServiceNetworkId",
                                  p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "ServiceNetworkId" ) : NULL );
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "ServiceTlvStreamId",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "ServiceTlvStreamId" ) : NULL );
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "PresentEventId",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "PresentEventId" ) : NULL );
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "PresentEventLanguage",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "PresentEventLanguage" ) : NULL );
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "PresentEventRunningStatus",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "PresentEventRunningStatus" ) : NULL );
+        input_item_SetMetaExtra( input_priv(p_input)->p_item, "PresentEventFreeCA",
+                                 p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "PresentEventFreeCA" ) : NULL );
         input_item_SetMetaExtra( input_priv(p_input)->p_item, "PresentEventName",
                                  p_pgrm->p_meta ? vlc_meta_GetExtra( p_pgrm->p_meta, "PresentEventName" ) : NULL );
         input_item_SetMetaExtra( input_priv(p_input)->p_item, "PresentEventDesc",

@@ -1,0 +1,468 @@
+From 4df48ee7efd2e4f73ffc1eafb16a27d600108bd6 Mon Sep 17 00:00:00 2001
+From: ci7lus <7887955+ci7lus@users.noreply.github.com>
+Date: Sat, 29 Aug 2026 00:00:00 +0900
+Subject: [PATCH] avformat/mmtp: expose MH service, event and TOT metadata
+
+Parse MH-SDT, MH-EIT present/following, and MH-TOT signalling. Expose the selected service and present event through program metadata, publish MH-TOT as UTC epoch microseconds, validate BCD time fields, and notify consumers only when metadata actually changes.
+---
+ libavformat/mmtp.c | 323 +++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 314 insertions(+), 9 deletions(-)
+
+diff --git a/libavformat/mmtp.c b/libavformat/mmtp.c
+index f9294bc931..a8d8c72766 100644
+--- a/libavformat/mmtp.c
++++ b/libavformat/mmtp.c
+@@ -20,11 +20,13 @@
+  */
+ 
+ #include <stdbool.h>
++#include <stdlib.h>
+ 
+ #include "libavcodec/bytestream.h"
+ #include "libavcodec/avcodec.h"
+ #include "libavutil/avassert.h"
+ #include "libavutil/mem.h"
++#include "libavutil/parseutils.h"
+ #include "demux.h"
+ #include "internal.h"
+ #include "mmtp.h"
+@@ -179,8 +181,28 @@ struct MMTPContext {
+     AVPacket        *pkt;
+     uint16_t        current_pid;
+     uint8_t         is_rap;
++    bool            network_time_update_notified;
+ };
+ 
++static void mmt_set_program_metadata(MMTPContext *ctx, const char *key,
++                                     const char *value)
++{
++    const AVDictionaryEntry *current =
++        av_dict_get(ctx->program->metadata, key, NULL, 0);
++    if ((current == NULL) != (value == NULL) ||
++        (current && value && strcmp(current->value, value) != 0))
++        ctx->s->event_flags |= AVFMT_EVENT_FLAG_METADATA_UPDATED;
++    av_dict_set(&ctx->program->metadata, key, value, 0);
++}
++
++static void mmt_set_program_metadata_int(MMTPContext *ctx, const char *key,
++                                         int64_t value)
++{
++    char text[32];
++    snprintf(text, sizeof(text), "%" PRId64, value);
++    mmt_set_program_metadata(ctx, key, text);
++}
++
+ static struct Streams *find_current_stream(struct MMTPContext *ctx)
+ {
+     struct Streams *streams;
+@@ -217,6 +239,9 @@ enum {
+     MMT_PACKAGE_TABLE_ID  = 0x20,
+     PACKAGE_LIST_TABLE_ID = 0x80,
+     MH_EIT_TABLE_ID       = 0x8B,
++    MH_SDT_TABLE_ID       = 0x9F,
++    MH_SDT_OTHER_TABLE_ID = 0xA0,
++    MH_TOT_TABLE_ID       = 0xA1,
+ };
+ 
+ enum {
+@@ -226,9 +251,57 @@ enum {
+     MH_AUDIO_COMPONENT_DESCRIPTOR     = 0x8014,
+     MH_DATA_COMPONENT_DESCRIPTOR      = 0x8020,
+     MPU_EXTENDED_TIMESTAMP_DESCRIPTOR = 0x8026,
++    MH_SERVICE_DESCRIPTOR              = 0x8019,
+     MH_SHORT_EVENT_DESCRIPTOR         = 0xF001,
+ };
+ 
++static int64_t mmt_mjd_bcd_to_epoch(uint64_t value)
++{
++    const int mjd = value >> 24;
++    const int yp = (int)((mjd - 15078.2) / 365.25);
++    const int mp = (int)((mjd - 14956.1 - (int)(yp * 365.25)) / 30.6001);
++    const int c = (mp == 14 || mp == 15);
++    const int hour = ((value >> 20) & 0xf) * 10 + ((value >> 16) & 0xf);
++    const int minute = ((value >> 12) & 0xf) * 10 + ((value >> 8) & 0xf);
++    const int second = ((value >> 4) & 0xf) * 10 + (value & 0xf);
++    /* MJD is binary; only the lower 24-bit clock is BCD encoded. */
++    const uint32_t bcd_time = value & UINT32_C(0xffffff);
++    for (int shift = 0; shift < 24; shift += 4)
++        if (((bcd_time >> shift) & 0xf) > 9)
++            return AV_NOPTS_VALUE;
++    if (hour > 23 || minute > 59 || second > 59)
++        return AV_NOPTS_VALUE;
++    struct tm tm = {
++        .tm_year = 1900 + yp + c - 1900,
++        .tm_mon = mp - 1 - c * 12 - 1,
++        .tm_mday = mjd - 14956 - (int)(yp * 365.25) - (int)(mp * 30.6001),
++        .tm_hour = hour,
++        .tm_min = minute,
++        .tm_sec = second,
++        .tm_isdst = 0,
++    };
++    return av_timegm(&tm) - 9 * 3600;
++}
++
++static uint64_t mmt_get_40bits(GetByteContext *gbc)
++{
++    return ((uint64_t)bytestream2_get_be32u(gbc) << 8) |
++           bytestream2_get_byteu(gbc);
++}
++
++static int mmt_bcd_duration(uint32_t value)
++{
++    for (int shift = 0; shift < 24; shift += 4)
++        if (((value >> shift) & 0xf) > 9)
++            return -1;
++    const unsigned hours = ((value >> 20) & 0xf) * 10 + ((value >> 16) & 0xf);
++    const unsigned minutes = ((value >> 12) & 0xf) * 10 + ((value >> 8) & 0xf);
++    const unsigned seconds = ((value >> 4) & 0xf) * 10 + (value & 0xf);
++    if (minutes > 59 || seconds > 59)
++        return -1;
++    return hours * 3600 + minutes * 60 + seconds;
++}
++
+ static int
+ parse_video_component_descriptor(AVStream *stream, GetByteContext *gbc)
+ {
+@@ -760,6 +831,13 @@ static int parse_mh_short_event_descriptor(
+         text = av_strndup(ngbc.buffer, text_length);
+         bytestream2_skipu(&ngbc, text_length);
+ 
++        /* Keep the conventional program fields for existing consumers and also
++         * expose an explicit present-event namespace to the VLC bridge. */
++        mmt_set_program_metadata(ctx, "mmt.present_event_lang",
++                                 (const char *)language_code);
++        mmt_set_program_metadata(ctx, "mmt.present_event_name", event_name);
++        mmt_set_program_metadata(ctx, "mmt.present_event_desc", text);
++
+         /* Notify VLC when any present-event field changes, including removal. */
+         const AVDictionaryEntry *cur = av_dict_get(ctx->program->metadata, "title", NULL, 0);
+         const AVDictionaryEntry *desc = av_dict_get(ctx->program->metadata, "description", NULL, 0);
+@@ -799,6 +877,147 @@ static int parse_mh_eit_descriptor(MMTPContext *ctx, GetByteContext *gbc)
+     }
+ }
+ 
++static int parse_mh_service_descriptor(MMTPContext *ctx, uint16_t service_id,
++                                       GetByteContext *gbc)
++{
++    uint8_t length, provider_length, name_length;
++    uint8_t service_type;
++    char *provider = NULL, *name = NULL;
++    if (bytestream2_get_bytes_left(gbc) < 3 ||
++        bytestream2_get_be16u(gbc) != MH_SERVICE_DESCRIPTOR)
++        return AVERROR_INVALIDDATA;
++    length = bytestream2_get_byteu(gbc);
++    if (bytestream2_get_bytes_left(gbc) < length)
++        return AVERROR_INVALIDDATA;
++    {
++        GetByteContext ngbc;
++        bytestream2_init(&ngbc, gbc->buffer, length);
++        if (bytestream2_get_bytes_left(&ngbc) < 2)
++            return AVERROR_INVALIDDATA;
++        service_type = bytestream2_get_byteu(&ngbc);
++        provider_length = bytestream2_get_byteu(&ngbc);
++        if (bytestream2_get_bytes_left(&ngbc) < provider_length + 1)
++            return AVERROR_INVALIDDATA;
++        provider = av_strndup(ngbc.buffer, provider_length);
++        bytestream2_skipu(&ngbc, provider_length);
++        name_length = bytestream2_get_byteu(&ngbc);
++        if (bytestream2_get_bytes_left(&ngbc) < name_length)
++            goto fail;
++        name = av_strndup(ngbc.buffer, name_length);
++    }
++    mmt_set_program_metadata_int(ctx, "mmt.service_id", service_id);
++    mmt_set_program_metadata_int(ctx, "mmt.service_type", service_type);
++    mmt_set_program_metadata(ctx, "mmt.service_provider", provider);
++    mmt_set_program_metadata(ctx, "mmt.service_name", name);
++    av_freep(&provider);
++    av_freep(&name);
++    bytestream2_skipu(gbc, length);
++    return 0;
++fail:
++    av_free(provider);
++    av_free(name);
++    return AVERROR_INVALIDDATA;
++}
++
++static int parse_mh_sdt_table(MMTPContext *ctx, GetByteContext *gbc)
++{
++    uint16_t section_length;
++    uint8_t table_id;
++    if (bytestream2_get_bytes_left(gbc) < 3 ||
++        ((table_id = bytestream2_get_byteu(gbc)) != MH_SDT_TABLE_ID &&
++         table_id != MH_SDT_OTHER_TABLE_ID))
++        return AVERROR_INVALIDDATA;
++    section_length = bytestream2_get_be16u(gbc) & 0x0fff;
++    if (section_length < 4 || bytestream2_get_bytes_left(gbc) < section_length)
++        return AVERROR_INVALIDDATA;
++    {
++        GetByteContext ngbc;
++        uint16_t tlv_stream_id, network_id, target_service_id = UINT16_MAX;
++        const AVDictionaryEntry *target =
++            av_dict_get(ctx->program->metadata, "mmt.service_id", NULL, 0);
++        if (target != NULL)
++            target_service_id = strtoul(target->value, NULL, 10);
++        bytestream2_init(&ngbc, gbc->buffer, section_length - 4);
++        if (bytestream2_get_bytes_left(&ngbc) < 8)
++            return AVERROR_INVALIDDATA;
++        tlv_stream_id = bytestream2_get_be16u(&ngbc);
++        uint8_t version_byte = bytestream2_get_byteu(&ngbc);
++        bytestream2_skipu(&ngbc, 2); /* section numbers */
++        network_id = bytestream2_get_be16u(&ngbc);
++        bytestream2_skipu(&ngbc, 1); /* reserved */
++        if (table_id == MH_SDT_OTHER_TABLE_ID || !(version_byte & 1)) {
++            bytestream2_skipu(gbc, section_length);
++            return 0;
++        }
++
++        while (bytestream2_get_bytes_left(&ngbc) >= 4) {
++            uint16_t service_id = bytestream2_get_be16u(&ngbc);
++            uint16_t flags_length = bytestream2_get_be16u(&ngbc);
++            uint16_t descriptors_length = flags_length & 0x0fff;
++            GetByteContext dgbc;
++            if (bytestream2_get_bytes_left(&ngbc) < descriptors_length)
++                return AVERROR_INVALIDDATA;
++            if (service_id == target_service_id) {
++                mmt_set_program_metadata_int(ctx, "mmt.tlv_stream_id",
++                                             tlv_stream_id);
++                mmt_set_program_metadata_int(ctx, "mmt.network_id",
++                                             network_id);
++                bytestream2_init(&dgbc, ngbc.buffer, descriptors_length);
++                while (bytestream2_get_bytes_left(&dgbc) >= 3) {
++                    if (bytestream2_peek_be16u(&dgbc) == MH_SERVICE_DESCRIPTOR) {
++                        int err = parse_mh_service_descriptor(ctx, service_id, &dgbc);
++                        if (err < 0)
++                            return err;
++                    } else {
++                        int err = skip_unknown_descriptor(ctx->s, &dgbc);
++                        if (err < 0)
++                            return err;
++                    }
++                }
++            }
++            bytestream2_skipu(&ngbc, descriptors_length);
++        }
++    }
++    bytestream2_skipu(gbc, section_length);
++    return 0;
++}
++
++static int parse_mh_tot_table(MMTPContext *ctx, GetByteContext *gbc)
++{
++    uint16_t section_length;
++    if (bytestream2_get_bytes_left(gbc) < 3 ||
++        bytestream2_get_byteu(gbc) != MH_TOT_TABLE_ID)
++        return AVERROR_INVALIDDATA;
++    section_length = bytestream2_get_be16u(gbc) & 0x0fff;
++    if (section_length < 4 + 5 + 2 ||
++        bytestream2_get_bytes_left(gbc) < section_length)
++        return AVERROR_INVALIDDATA;
++    {
++        uint64_t jst_time = mmt_get_40bits(gbc);
++        if (jst_time == UINT64_C(0xffffffffff))
++            return AVERROR_INVALIDDATA;
++        int64_t epoch = mmt_mjd_bcd_to_epoch(jst_time);
++        if (epoch == AV_NOPTS_VALUE)
++            return AVERROR_INVALIDDATA;
++        char value[64];
++        uint16_t descriptors_length = bytestream2_get_be16u(gbc) & 0x0fff;
++        if (bytestream2_get_bytes_left(gbc) < descriptors_length + 4)
++            return AVERROR_INVALIDDATA;
++        snprintf(value, sizeof(value), "%" PRId64, epoch * INT64_C(1000000));
++        const AVDictionaryEntry *current =
++            av_dict_get(ctx->s->metadata, "mmt.network_time_us", NULL, 0);
++        if ((!current || strcmp(current->value, value) != 0) &&
++            !ctx->network_time_update_notified) {
++            ctx->s->event_flags |= AVFMT_EVENT_FLAG_METADATA_UPDATED;
++            ctx->network_time_update_notified = true;
++        }
++        av_dict_set(&ctx->s->metadata, "mmt.network_time_us", value, 0);
++        bytestream2_skipu(gbc, descriptors_length);
++    }
++    bytestream2_skipu(gbc, 4); /* CRC */
++    return 0;
++}
++
+ static int parse_mmt_package_table(MMTPContext *ctx, GetByteContext *gbc)
+ {
+     uint16_t length;
+@@ -990,6 +1209,7 @@ static int parse_mh_eit_table(MMTPContext *ctx, GetByteContext *gbc)
+         return AVERROR_INVALIDDATA;
+     {
+         uint8_t        version_byte, section_number;
++        uint16_t       service_id, tlv_stream_id, network_id;
+         GetByteContext ngbc;
+         bytestream2_init(&ngbc, gbc->buffer, section_length - 4);
+ 
+@@ -1001,10 +1221,13 @@ static int parse_mh_eit_table(MMTPContext *ctx, GetByteContext *gbc)
+             bytestream2_skipu(gbc, section_length);
+             return 0;
+         }
+-        bytestream2_skipu(&ngbc, 2);                    /* service_id */
++        service_id      = bytestream2_get_be16u(&ngbc);
+         version_byte   = bytestream2_get_byteu(&ngbc);  /* .. + current_next_indicator */
+         section_number = bytestream2_get_byteu(&ngbc);
+-        bytestream2_skipu(&ngbc, 7);                    /* last_section_number .. last_table_id */
++        bytestream2_skipu(&ngbc, 1);                    /* last_section_number */
++        tlv_stream_id   = bytestream2_get_be16u(&ngbc);
++        network_id      = bytestream2_get_be16u(&ngbc);
++        bytestream2_skipu(&ngbc, 2);                    /* segment_last_section_number, last_table_id */
+ 
+         /* In MH-EIT[p/f], section 0 carries the PRESENT (on-air) event and section 1 the
+          * FOLLOWING (next) event. Only the present event names the current program; parsing the
+@@ -1015,27 +1238,95 @@ static int parse_mh_eit_table(MMTPContext *ctx, GetByteContext *gbc)
+             bytestream2_skipu(gbc, section_length);
+             return 0;
+         }
+-
++        mmt_set_program_metadata_int(ctx, "mmt.service_id", service_id);
++        mmt_set_program_metadata_int(ctx, "mmt.tlv_stream_id", tlv_stream_id);
++        mmt_set_program_metadata_int(ctx, "mmt.network_id", network_id);
++        mmt_set_program_metadata(ctx, "mmt.present_event", "1");
++        bool first_event = true;
+         while (bytestream2_get_bytes_left(&ngbc) > 0) {
+             uint16_t descriptors_loop_length;
++            uint16_t event_id;
++            uint64_t start_time;
++            uint32_t duration;
++            uint16_t status_and_length;
+ 
+-            bytestream2_skip(&ngbc, (16 + 40 + 24) / 8);
+-            descriptors_loop_length =
+-                bytestream2_get_be16u(&ngbc) & 0b0000111111111111;
++            if (bytestream2_get_bytes_left(&ngbc) < 16 / 8 + 5 + 3 + 2)
++                return AVERROR_INVALIDDATA;
++            event_id = bytestream2_get_be16u(&ngbc);
++            start_time = mmt_get_40bits(&ngbc);
++            duration = ((uint32_t)bytestream2_get_byteu(&ngbc) << 16) |
++                       ((uint32_t)bytestream2_get_byteu(&ngbc) << 8) |
++                       bytestream2_get_byteu(&ngbc);
++            status_and_length = bytestream2_get_be16u(&ngbc);
++            descriptors_loop_length = status_and_length & 0x0fff;
+ 
+             if (bytestream2_get_bytes_left(&ngbc) < descriptors_loop_length)
+                 return AVERROR_INVALIDDATA;
+-            {
++            if (first_event) {
+                 int            err;
+                 GetByteContext nngbc;
++                char value[64];
++
++                mmt_set_program_metadata_int(ctx, "mmt.present_event_id", event_id);
++                if (start_time != UINT64_C(0xffffffffff)) {
++                    int64_t epoch = mmt_mjd_bcd_to_epoch(start_time);
++                    if (epoch != AV_NOPTS_VALUE) {
++                        snprintf(value, sizeof(value), "%" PRId64, epoch);
++                        mmt_set_program_metadata(ctx, "mmt.present_event_start", value);
++                    } else
++                        mmt_set_program_metadata(ctx, "mmt.present_event_start", NULL);
++                } else
++                    mmt_set_program_metadata(ctx, "mmt.present_event_start", NULL);
++                if (duration != 0xffffff) {
++                    int seconds = mmt_bcd_duration(duration);
++                    if (seconds >= 0) {
++                        snprintf(value, sizeof(value), "%d", seconds);
++                        mmt_set_program_metadata(ctx, "mmt.present_event_duration", value);
++                    } else
++                        mmt_set_program_metadata(ctx, "mmt.present_event_duration", NULL);
++                } else
++                    mmt_set_program_metadata(ctx, "mmt.present_event_duration", NULL);
++                mmt_set_program_metadata_int(ctx, "mmt.present_event_running_status",
++                                             status_and_length >> 13);
++                mmt_set_program_metadata_int(ctx, "mmt.present_event_free_ca",
++                                             (status_and_length >> 12) & 1);
++
+                 bytestream2_init(&nngbc, ngbc.buffer, descriptors_loop_length);
+ 
+-                while (bytestream2_get_bytes_left(&nngbc) > 0)
++                bool have_short_event = false;
++                while (bytestream2_get_bytes_left(&nngbc) > 0) {
++                    if (bytestream2_get_bytes_left(&nngbc) < 3)
++                        return AVERROR_INVALIDDATA;
++                    if (bytestream2_peek_be16u(&nngbc) == MH_SHORT_EVENT_DESCRIPTOR)
++                        have_short_event = true;
+                     if ((err = parse_mh_eit_descriptor(ctx, &nngbc)) < 0)
+                         return err;
++                }
++                if (!have_short_event) {
++                    mmt_set_program_metadata(ctx, "title", NULL);
++                    mmt_set_program_metadata(ctx, "description", NULL);
++                    mmt_set_program_metadata(ctx, "language", NULL);
++                    mmt_set_program_metadata(ctx, "mmt.present_event_name", NULL);
++                    mmt_set_program_metadata(ctx, "mmt.present_event_desc", NULL);
++                    mmt_set_program_metadata(ctx, "mmt.present_event_lang", NULL);
++                }
++                first_event = false;
+             }
+             bytestream2_skipu(&ngbc, descriptors_loop_length);
+         }
++        if (first_event) {
++            mmt_set_program_metadata(ctx, "title", NULL);
++            mmt_set_program_metadata(ctx, "description", NULL);
++            mmt_set_program_metadata(ctx, "language", NULL);
++            mmt_set_program_metadata(ctx, "mmt.present_event_name", NULL);
++            mmt_set_program_metadata(ctx, "mmt.present_event_desc", NULL);
++            mmt_set_program_metadata(ctx, "mmt.present_event_lang", NULL);
++            mmt_set_program_metadata(ctx, "mmt.present_event_id", NULL);
++            mmt_set_program_metadata(ctx, "mmt.present_event_start", NULL);
++            mmt_set_program_metadata(ctx, "mmt.present_event_duration", NULL);
++            mmt_set_program_metadata(ctx, "mmt.present_event_running_status", NULL);
++            mmt_set_program_metadata(ctx, "mmt.present_event_free_ca", NULL);
++        }
+     }
+     bytestream2_skipu(gbc, section_length);
+ 
+@@ -1053,6 +1344,11 @@ static int parse_table(MMTPContext *ctx, GetByteContext *gbc)
+         return parse_package_list_table(ctx, gbc);
+     case MH_EIT_TABLE_ID:
+         return parse_mh_eit_table(ctx, gbc);
++    case MH_SDT_TABLE_ID:
++    case MH_SDT_OTHER_TABLE_ID:
++        return parse_mh_sdt_table(ctx, gbc);
++    case MH_TOT_TABLE_ID:
++        return parse_mh_tot_table(ctx, gbc);
+     }
+     bytestream2_skipu(gbc, bytestream2_get_bytes_left(gbc)); // TODO
+     return 0;
+@@ -1061,6 +1357,7 @@ static int parse_table(MMTPContext *ctx, GetByteContext *gbc)
+ enum {
+     PA_MESSAGE_ID      = 0x0000,
+     M2_SECTION_MESSAGE = 0x8000,
++    M2_SHORT_SECTION_MESSAGE = 0x8002,
+ };
+ 
+ static int parse_pa_message(MMTPContext *ctx, GetByteContext *gbc)
+@@ -1105,11 +1403,14 @@ static int parse_pa_message(MMTPContext *ctx, GetByteContext *gbc)
+ static int parse_m2_section_message(MMTPContext *ctx, GetByteContext *gbc)
+ {
+     int      err;
++    uint16_t message_id;
+     uint16_t length;
+ 
+     if (bytestream2_get_bytes_left(gbc) < (16 + 8 + 16) / 8)
+         return AVERROR_INVALIDDATA;
+-    if (bytestream2_get_be16u(gbc) != M2_SECTION_MESSAGE)
++    message_id = bytestream2_get_be16u(gbc);
++    if (message_id != M2_SECTION_MESSAGE &&
++        message_id != M2_SHORT_SECTION_MESSAGE)
+         return AVERROR_INVALIDDATA;
+     // skip: version
+     bytestream2_skipu(gbc, 1);
+@@ -1135,6 +1436,7 @@ static int parse_signalling_message(MMTPContext *ctx, GetByteContext *gbc)
+     case PA_MESSAGE_ID:
+         return parse_pa_message(ctx, gbc);
+     case M2_SECTION_MESSAGE:
++    case M2_SHORT_SECTION_MESSAGE:
+         return parse_m2_section_message(ctx, gbc);
+     }
+     return 0;
+@@ -1805,6 +2108,8 @@ void ff_mmtp_reset_state(MMTPContext *ctx)
+     struct Streams           *streams;
+     struct FragmentAssembler *assembler;
+ 
++    ctx->network_time_update_notified = false;
++
+     for (assembler = ctx->assembler;
+          assembler != NULL; assembler = assembler->next) {
+         assembler->state = INIT;
+-- 
+2.39.1

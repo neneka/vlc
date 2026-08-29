@@ -1,0 +1,393 @@
+From dc93f771238db58ac8a1be6ffe9694ab7e442039 Mon Sep 17 00:00:00 2001
+From: ci7lus <7887955+ci7lus@users.noreply.github.com>
+Date: Sun, 30 Aug 2026 11:10:31 +0900
+Subject: [PATCH] avformat/mmttlv: derive service and media-zero network time
+
+Parse MH-BIT broadcaster and service-list descriptors as a fallback when MH-SDT is absent. Associate each newly observed MH-TOT network time with a VLC-style PCR built from active stream DTS values. Expose the resulting absolute time of media position zero and normalize timestamps across stream time bases.
+---
+ libavformat/mmtp.c   | 125 +++++++++++++++++++++++++++++++++++++
+ libavformat/mmttlv.c | 143 +++++++++++++++++++++++++++++++++++++++----
+ 2 files changed, 257 insertions(+), 11 deletions(-)
+
+diff --git a/libavformat/mmtp.c b/libavformat/mmtp.c
+index 6ccc184..c057ed7 100644
+--- a/libavformat/mmtp.c
++++ b/libavformat/mmtp.c
+@@ -239,6 +239,7 @@ enum {
+     MMT_PACKAGE_TABLE_ID  = 0x20,
+     PACKAGE_LIST_TABLE_ID = 0x80,
+     MH_EIT_TABLE_ID       = 0x8B,
++    MH_BIT_TABLE_ID       = 0x9D,
+     MH_SDT_TABLE_ID       = 0x9F,
+     MH_SDT_OTHER_TABLE_ID = 0xA0,
+     MH_TOT_TABLE_ID       = 0xA1,
+@@ -251,6 +252,8 @@ enum {
+     MH_AUDIO_COMPONENT_DESCRIPTOR     = 0x8014,
+     MH_DATA_COMPONENT_DESCRIPTOR      = 0x8020,
+     MPU_EXTENDED_TIMESTAMP_DESCRIPTOR = 0x8026,
++    MH_SERVICE_LIST_DESCRIPTOR         = 0x800D,
++    MH_BROADCASTER_NAME_DESCRIPTOR     = 0x8018,
+     MH_SERVICE_DESCRIPTOR              = 0x8019,
+     MH_SHORT_EVENT_DESCRIPTOR         = 0xF001,
+ };
+@@ -1020,6 +1023,126 @@ static int parse_mh_tot_table(MMTPContext *ctx, GetByteContext *gbc)
+     return 0;
+ }
+ 
++static int parse_mh_bit_table(MMTPContext *ctx, GetByteContext *gbc)
++{
++    uint16_t section_length;
++    uint16_t target_service_id = UINT16_MAX;
++    const AVDictionaryEntry *target =
++        av_dict_get(ctx->program->metadata, "mmt.service_id", NULL, 0);
++
++    if (bytestream2_get_bytes_left(gbc) < 3 ||
++        bytestream2_get_byteu(gbc) != MH_BIT_TABLE_ID)
++        return AVERROR_INVALIDDATA;
++    section_length = bytestream2_get_be16u(gbc) & 0x0fff;
++    if (section_length < 11 ||
++        bytestream2_get_bytes_left(gbc) < section_length)
++        return AVERROR_INVALIDDATA;
++    if (target != NULL)
++        target_service_id = strtoul(target->value, NULL, 10);
++
++    {
++        GetByteContext ngbc;
++        uint16_t network_id, first_descriptors_length;
++        uint8_t version_byte;
++
++        bytestream2_init(&ngbc, gbc->buffer, section_length - 4);
++        if (bytestream2_get_bytes_left(&ngbc) < 7)
++            return AVERROR_INVALIDDATA;
++        network_id = bytestream2_get_be16u(&ngbc);
++        version_byte = bytestream2_get_byteu(&ngbc);
++        bytestream2_skipu(&ngbc, 2); /* section numbers */
++        first_descriptors_length = bytestream2_get_be16u(&ngbc) & 0x0fff;
++        if (bytestream2_get_bytes_left(&ngbc) < first_descriptors_length)
++            return AVERROR_INVALIDDATA;
++        bytestream2_skipu(&ngbc, first_descriptors_length);
++
++        if (version_byte & 1) {
++            while (bytestream2_get_bytes_left(&ngbc) >= 3) {
++                uint8_t broadcaster_id = bytestream2_get_byteu(&ngbc);
++                uint16_t descriptors_length =
++                    bytestream2_get_be16u(&ngbc) & 0x0fff;
++                GetByteContext dgbc;
++                char *broadcaster_name = NULL;
++                int service_type = -1;
++                bool carries_target = false;
++
++                if (bytestream2_get_bytes_left(&ngbc) < descriptors_length)
++                    return AVERROR_INVALIDDATA;
++                bytestream2_init(&dgbc, ngbc.buffer, descriptors_length);
++                while (bytestream2_get_bytes_left(&dgbc) >= 3) {
++                    uint16_t tag = bytestream2_peek_be16u(&dgbc);
++                    if (tag == MH_BROADCASTER_NAME_DESCRIPTOR) {
++                        uint8_t length;
++                        bytestream2_skipu(&dgbc, 2);
++                        length = bytestream2_get_byteu(&dgbc);
++                        if (bytestream2_get_bytes_left(&dgbc) < length) {
++                            av_free(broadcaster_name);
++                            return AVERROR_INVALIDDATA;
++                        }
++                        av_freep(&broadcaster_name);
++                        broadcaster_name = av_strndup(dgbc.buffer, length);
++                        if (broadcaster_name == NULL)
++                            return AVERROR(ENOMEM);
++                        bytestream2_skipu(&dgbc, length);
++                    } else if (tag == MH_SERVICE_LIST_DESCRIPTOR) {
++                        uint8_t length;
++                        GetByteContext lgbc;
++                        bytestream2_skipu(&dgbc, 2);
++                        length = bytestream2_get_byteu(&dgbc);
++                        if (bytestream2_get_bytes_left(&dgbc) < length) {
++                            av_free(broadcaster_name);
++                            return AVERROR_INVALIDDATA;
++                        }
++                        bytestream2_init(&lgbc, dgbc.buffer, length);
++                        while (bytestream2_get_bytes_left(&lgbc) >= 3) {
++                            uint16_t service_id = bytestream2_get_be16u(&lgbc);
++                            uint8_t type = bytestream2_get_byteu(&lgbc);
++                            if (service_id == target_service_id) {
++                                carries_target = true;
++                                service_type = type;
++                            }
++                        }
++                        bytestream2_skipu(&dgbc, length);
++                    } else {
++                        int err = skip_unknown_descriptor(ctx->s, &dgbc);
++                        if (err < 0) {
++                            av_free(broadcaster_name);
++                            return err;
++                        }
++                    }
++                }
++
++                if (carries_target && broadcaster_name != NULL) {
++                    const AVDictionaryEntry *service_name =
++                        av_dict_get(ctx->program->metadata,
++                                    "mmt.service_name", NULL, 0);
++                    const AVDictionaryEntry *type =
++                        av_dict_get(ctx->program->metadata,
++                                    "mmt.service_type", NULL, 0);
++                    mmt_set_program_metadata_int(ctx, "mmt.network_id",
++                                                 network_id);
++                    mmt_set_program_metadata_int(ctx, "mmt.broadcaster_id",
++                                                 broadcaster_id);
++                    mmt_set_program_metadata(ctx, "mmt.broadcaster_name",
++                                             broadcaster_name);
++                    /* MH-SDT supplies the actual service name.  MH-BIT only
++                     * identifies the broadcaster, so use it as a fallback. */
++                    if (service_name == NULL)
++                        mmt_set_program_metadata(ctx, "mmt.service_name",
++                                                 broadcaster_name);
++                    if (type == NULL && service_type >= 0)
++                        mmt_set_program_metadata_int(ctx, "mmt.service_type",
++                                                     service_type);
++                }
++                av_free(broadcaster_name);
++                bytestream2_skipu(&ngbc, descriptors_length);
++            }
++        }
++    }
++    bytestream2_skipu(gbc, section_length);
++    return 0;
++}
++
+ static int parse_mmt_package_table(MMTPContext *ctx, GetByteContext *gbc)
+ {
+     uint16_t length;
+@@ -1346,6 +1469,8 @@ static int parse_table(MMTPContext *ctx, GetByteContext *gbc)
+         return parse_package_list_table(ctx, gbc);
+     case MH_EIT_TABLE_ID:
+         return parse_mh_eit_table(ctx, gbc);
++    case MH_BIT_TABLE_ID:
++        return parse_mh_bit_table(ctx, gbc);
+     case MH_SDT_TABLE_ID:
+     case MH_SDT_OTHER_TABLE_ID:
+         return parse_mh_sdt_table(ctx, gbc);
+diff --git a/libavformat/mmttlv.c b/libavformat/mmttlv.c
+index a72d4f1..93c85b4 100644
+--- a/libavformat/mmttlv.c
++++ b/libavformat/mmttlv.c
+@@ -21,6 +21,10 @@
+ 
+ #include "config_components.h"
+ 
++#include <errno.h>
++#include <stdbool.h>
++#include <stdlib.h>
++
+ #include "libavutil/mem.h"
+ #include "libavutil/intreadwrite.h"
+ #include "avformat.h"
+@@ -106,7 +110,11 @@ struct MMTTLVContext {
+     size_t  cap;
+     uint8_t *buf;
+ 
+-    int64_t first_pts;
++    int64_t first_time_us;
++    int64_t *stream_times_us;
++    unsigned int nb_stream_times;
++    int64_t last_network_time_us;
++    bool initial_network_time_set;
+ };
+ 
+ static int mmttlv_read_ipv6_packet(
+@@ -209,6 +217,82 @@ static int mmttlv_valid_type(uint8_t t)
+            t == TRANSMISSION_CONTROL_PACKET || t == NULL_PACKET;
+ }
+ 
++static void mmttlv_reset_stream_times(struct MMTTLVContext *ctx)
++{
++    for (unsigned int i = 0; i < ctx->nb_stream_times; i++)
++        ctx->stream_times_us[i] = AV_NOPTS_VALUE;
++}
++
++static int mmttlv_set_stream_time(struct MMTTLVContext *ctx,
++                                  unsigned int stream_index, int64_t time_us)
++{
++    if (stream_index >= ctx->nb_stream_times) {
++        unsigned int old_count = ctx->nb_stream_times;
++        unsigned int new_count = stream_index + 1;
++        int64_t *times = av_realloc_array(ctx->stream_times_us, new_count,
++                                          sizeof(*times));
++        if (times == NULL)
++            return AVERROR(ENOMEM);
++        ctx->stream_times_us = times;
++        ctx->nb_stream_times = new_count;
++        for (unsigned int i = old_count; i < new_count; i++)
++            times[i] = AV_NOPTS_VALUE;
++    }
++    ctx->stream_times_us[stream_index] = time_us;
++    return 0;
++}
++
++static int64_t mmttlv_get_pcr(const struct MMTTLVContext *ctx)
++{
++    int64_t maximum = AV_NOPTS_VALUE;
++    int64_t minimum = INT64_MAX;
++
++    for (unsigned int i = 0; i < ctx->nb_stream_times; i++)
++        if (ctx->stream_times_us[i] != AV_NOPTS_VALUE)
++            maximum = FFMAX(maximum, ctx->stream_times_us[i]);
++    if (maximum == AV_NOPTS_VALUE)
++        return AV_NOPTS_VALUE;
++
++    /* Match VLC avformat's PCR: ignore inactive tracks more than ten
++     * seconds behind, then use the earliest active decoding timestamp. */
++    for (unsigned int i = 0; i < ctx->nb_stream_times; i++) {
++        int64_t time = ctx->stream_times_us[i];
++        if (time != AV_NOPTS_VALUE &&
++            time >= maximum - INT64_C(10000000))
++            minimum = FFMIN(minimum, time);
++    }
++    return minimum == INT64_MAX ? AV_NOPTS_VALUE : minimum;
++}
++
++static void mmttlv_update_initial_network_time(struct MMTTLVContext *ctx,
++                                               AVFormatContext *s)
++{
++    const AVDictionaryEntry *entry;
++    int64_t network_time_us, pcr;
++    char *end;
++
++    if (ctx->initial_network_time_set)
++        return;
++    entry = av_dict_get(s->metadata, "mmt.network_time_us", NULL, 0);
++    if (entry == NULL || entry->value == NULL)
++        return;
++    errno = 0;
++    network_time_us = strtoll(entry->value, &end, 10);
++    if (errno != 0 || *end != '\0' || network_time_us <= 0 ||
++        network_time_us == ctx->last_network_time_us)
++        return;
++    ctx->last_network_time_us = network_time_us;
++
++    pcr = mmttlv_get_pcr(ctx);
++    if (pcr == AV_NOPTS_VALUE)
++        return;
++    if (av_dict_set_int(&s->metadata, "mmt.initial_network_time_us",
++                        network_time_us - pcr, 0) < 0)
++        return;
++    s->event_flags |= AVFMT_EVENT_FLAG_METADATA_UPDATED;
++    ctx->initial_network_time_set = true;
++}
++
+ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+ {
+     uint8_t              header[4];
+@@ -222,6 +306,7 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+ 
+     if (pos < 0) return (int) pos;
+     if (pos != ctx->last_pos) {
++        mmttlv_reset_stream_times(ctx);
+         ctx->last_pos = pos;
+ 
+         while (pos - ctx->last_pos < ctx->resync_size) {
+@@ -324,6 +409,10 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+         err = FFERROR_REDO;
+     }
+ 
++    /* Signalling packets do not produce an AVPacket.  Associate a newly
++     * parsed MH-TOT with the PCR immediately preceding that signalling. */
++    mmttlv_update_initial_network_time(ctx, s);
++
+     if (err == FFERROR_REDO)
+         goto retry;
+ 
+@@ -343,16 +432,43 @@ static int mmttlv_read_packet(AVFormatContext *s, AVPacket *pkt)
+     }
+ 
+     if (err >= 0 && pkt) {
+-        // On a non-seekable input read_header cannot scan for first_pts, so anchor
++        AVStream *stream;
++        int64_t clock_ts;
++        int ret;
++
++        if (pkt->stream_index < 0 || pkt->stream_index >= s->nb_streams)
++            return AVERROR_INVALIDDATA;
++        stream = s->streams[pkt->stream_index];
++
++        // On a non-seekable input read_header cannot scan for first_time_us, so anchor
+         // it on the first timestamped packet; MMT presentation times are absolute
+         // (NTP-derived) and would otherwise reach the decoder unnormalized.
+-        if (ctx->first_pts == AV_NOPTS_VALUE && pkt->pts != AV_NOPTS_VALUE)
+-            ctx->first_pts = pkt->pts;
+-        if (ctx->first_pts != AV_NOPTS_VALUE) {
++        if (ctx->first_time_us == AV_NOPTS_VALUE &&
++            pkt->pts != AV_NOPTS_VALUE)
++            ctx->first_time_us = av_rescale_q(pkt->pts, stream->time_base,
++                                               AV_TIME_BASE_Q);
++        if (ctx->first_time_us != AV_NOPTS_VALUE) {
+             if (pkt->pts != AV_NOPTS_VALUE)
+-                pkt->pts -= ctx->first_pts;
++                pkt->pts = av_rescale_q(
++                    av_rescale_q(pkt->pts, stream->time_base, AV_TIME_BASE_Q) -
++                        ctx->first_time_us,
++                    AV_TIME_BASE_Q, stream->time_base);
+             if (pkt->dts != AV_NOPTS_VALUE)
+-                pkt->dts -= ctx->first_pts;
++                pkt->dts = av_rescale_q(
++                    av_rescale_q(pkt->dts, stream->time_base, AV_TIME_BASE_Q) -
++                        ctx->first_time_us,
++                    AV_TIME_BASE_Q, stream->time_base);
++        }
++
++        clock_ts = pkt->dts != AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
++        if (clock_ts != AV_NOPTS_VALUE) {
++            ret = mmttlv_set_stream_time(
++                ctx, pkt->stream_index,
++                av_rescale_q(clock_ts, stream->time_base, AV_TIME_BASE_Q));
++            if (ret < 0) {
++                av_packet_unref(pkt);
++                return ret;
++            }
+         }
+     }
+ 
+@@ -421,7 +537,10 @@ static int mmttlv_read_header(AVFormatContext *s)
+ 
+     ctx->resync_size  = 4096;
+     ctx->resync_fails = 0;
+-    ctx->first_pts   = AV_NOPTS_VALUE;
++    ctx->first_time_us = AV_NOPTS_VALUE;
++    ctx->last_network_time_us = AV_NOPTS_VALUE;
++    ctx->initial_network_time_set = false;
++    mmttlv_reset_stream_times(ctx);
+     s->ctx_flags |= AVFMTCTX_NOHEADER;
+ 
+     if (!s->pb->seekable)
+@@ -442,9 +561,9 @@ static int mmttlv_read_header(AVFormatContext *s)
+         return AVERROR(ENOMEM);
+ 
+     // Read until the first timestamped packet; mmttlv_read_packet() anchors
+-    // first_pts on it (it must not be re-assigned here to the already-normalized
++    // first_time_us on it (it must not be re-assigned here to the already-normalized
+     // value the read returns).
+-    while (ctx->first_pts == AV_NOPTS_VALUE) {
++    while (ctx->first_time_us == AV_NOPTS_VALUE) {
+         av_packet_unref(pkt);
+         ret = mmttlv_read_packet(s, pkt);
+         if (ret < 0) {
+@@ -456,7 +575,7 @@ static int mmttlv_read_header(AVFormatContext *s)
+     }
+     av_packet_free(&pkt);
+ 
+-    if (ctx->first_pts != AV_NOPTS_VALUE && (file_size = avio_size(s->pb)) > 0) {
++    if (ctx->first_time_us != AV_NOPTS_VALUE && (file_size = avio_size(s->pb)) > 0) {
+         // Estimate duration from the last MPU timestamp, scanning only the trailing 32 MB so open()
+         // stays cheap on multi-GB files.
+         int64_t last_pos = FFMAX(0, file_size - 32 * 1024 * 1024);
+@@ -497,6 +616,8 @@ static int mmttlv_read_close(AVFormatContext *ctx)
+     priv->programs = NULL;
+     priv->cap      = 0;
+     av_freep(&priv->buf);
++    av_freep(&priv->stream_times_us);
++    priv->nb_stream_times = 0;
+     return 0;
+ }
+ 
+-- 
+2.39.1
+

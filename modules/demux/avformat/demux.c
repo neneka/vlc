@@ -34,6 +34,7 @@
 #include <vlc_demux.h>
 #include <vlc_stream.h>
 #include <vlc_meta.h>
+#include <vlc_epg.h>
 #include <vlc_input.h>
 #include <vlc_charset.h>
 #include <vlc_avcodec.h>
@@ -48,6 +49,8 @@
 
 #include <libavformat/avformat.h>
 #include <libavutil/display.h>
+#include <errno.h>
+#include <stdlib.h>
 
 #if LIBAVUTIL_VERSION_CHECK( 57, 16, 100 )
 # include <libavutil/dovi_meta.h>
@@ -91,6 +94,8 @@ typedef struct
     input_title_t *p_title;
     int i_seekpoint;
     unsigned i_update;
+    bool b_mmt_initial_network_time;
+    int64_t i_mmt_last_network_time_us;
 } demux_sys_t;
 
 #define AVFORMAT_IOBUFFER_SIZE 32768  /* FIXME */
@@ -108,8 +113,129 @@ static block_t *BuildSsaFrame( const AVPacket *p_pkt, unsigned i_order );
 static void UpdateSeekPoint( demux_t *p_demux, vlc_tick_t i_time );
 static void ResetTime( demux_t *p_demux, int64_t i_time );
 
+static const char *AVMetaGet( const AVProgram *p_program, const char *psz_key )
+{
+    const AVDictionaryEntry *entry =
+        av_dict_get( p_program->metadata, psz_key, NULL, 0 );
+    return entry ? entry->value : NULL;
+}
+
+static bool AVMetaGetInt64( const AVDictionary *p_dict, const char *psz_key,
+                            int64_t *p_value )
+{
+    const AVDictionaryEntry *entry = av_dict_get( p_dict, psz_key, NULL, 0 );
+    if( !entry || !entry->value || !*entry->value )
+        return false;
+    char *end;
+    errno = 0;
+    const int64_t value = strtoll( entry->value, &end, 10 );
+    if( errno != 0 || *end != '\0' )
+        return false;
+    *p_value = value;
+    return true;
+}
+
+static void UpdateMMTInitialNetworkTime( demux_t *p_demux, bool b_observed )
+{
+    demux_sys_t *p_sys = p_demux->p_sys;
+    int64_t network_time_us, demux_time;
+    int64_t initial_network_time_us;
+    const bool have_initial =
+        AVMetaGetInt64( p_sys->ic->metadata, "mmt.initial_network_time_us",
+                        &initial_network_time_us ) &&
+        initial_network_time_us > 0;
+    if( !have_initial &&
+        (!AVMetaGetInt64( p_sys->ic->metadata, "mmt.network_time_us",
+                          &network_time_us ) ||
+         network_time_us <= 0) )
+        return;
+    if( have_initial )
+    {
+        if( p_sys->b_mmt_initial_network_time )
+            return;
+        char value[64];
+        snprintf( value, sizeof(value), "%.6f",
+                  (double)initial_network_time_us / CLOCK_FREQ );
+        vlc_meta_t *meta = vlc_meta_New();
+        if( meta == NULL )
+            return;
+        vlc_meta_SetExtra( meta, "InitialNetworkTime", value );
+        es_out_Control( p_demux->out, ES_OUT_SET_GROUP_META, -1, meta );
+        vlc_meta_Delete( meta );
+        p_sys->b_mmt_initial_network_time = true;
+        return;
+    }
+    if( network_time_us <= 0 )
+        return;
+    if( !b_observed )
+    {
+        p_sys->i_mmt_last_network_time_us = network_time_us;
+        return;
+    }
+    if( network_time_us == p_sys->i_mmt_last_network_time_us )
+        return;
+    p_sys->i_mmt_last_network_time_us = network_time_us;
+    if( p_sys->b_mmt_initial_network_time ||
+        demux_Control( p_demux, DEMUX_GET_TIME, &demux_time ) != VLC_SUCCESS ||
+        demux_time < 0 )
+        return;
+
+    char value[64];
+    snprintf( value, sizeof(value), "%.6f",
+              (double)(network_time_us - demux_time) / CLOCK_FREQ );
+    vlc_meta_t *meta = vlc_meta_New();
+    if( meta == NULL )
+        return;
+    vlc_meta_SetExtra( meta, "InitialNetworkTime", value );
+    es_out_Control( p_demux->out, ES_OUT_SET_GROUP_META, -1, meta );
+    vlc_meta_Delete( meta );
+    p_sys->b_mmt_initial_network_time = true;
+}
+
+static void UpdateMMTProgramEpg( demux_t *p_demux, const AVProgram *program )
+{
+    if( AVMetaGet( program, "mmt.present_event" ) == NULL )
+        return;
+
+    int64_t event_id, start;
+    const bool have_start =
+        AVMetaGetInt64( program->metadata, "mmt.present_event_start", &start );
+    const bool have_id =
+        AVMetaGetInt64( program->metadata, "mmt.present_event_id", &event_id );
+    vlc_epg_t *epg = vlc_epg_New( 0x8B, program->id );
+    if( epg == NULL )
+        return;
+    epg->b_present = true;
+
+    if( have_start && have_id && event_id >= 0 && event_id <= UINT16_MAX )
+    {
+        int64_t duration = 0;
+        AVMetaGetInt64( program->metadata, "mmt.present_event_duration",
+                        &duration );
+        vlc_epg_event_t *event =
+            vlc_epg_event_New( event_id, start,
+                               duration >= 0 && duration <= UINT32_MAX ?
+                               duration : 0 );
+        if( event != NULL )
+        {
+            const char *name = AVMetaGet( program, "mmt.present_event_name" );
+            const char *desc = AVMetaGet( program, "mmt.present_event_desc" );
+            if( name != NULL )
+                event->psz_name = strdup( name );
+            if( desc != NULL )
+                event->psz_short_description = strdup( desc );
+            if( !vlc_epg_AddEvent( epg, event ) )
+                vlc_epg_event_Delete( event );
+            else
+                vlc_epg_SetCurrent( epg, start );
+        }
+    }
+    es_out_Control( p_demux->out, ES_OUT_SET_GROUP_EPG, program->id, epg );
+    vlc_epg_Delete( epg );
+}
+
 /* Keep FFmpeg's program metadata in the VLC program/group namespace. */
-static void UpdateProgramMetadata( demux_t *p_demux )
+static void UpdateProgramMetadata( demux_t *p_demux, bool b_observed )
 {
     demux_sys_t *p_sys = p_demux->p_sys;
     for( unsigned i = 0; i < p_sys->ic->nb_programs; i++ )
@@ -137,9 +263,46 @@ static void UpdateProgramMetadata( demux_t *p_demux )
             vlc_meta_Set( meta, vlc_meta_Language, entry->value );
         else
             vlc_meta_Set( meta, vlc_meta_Language, "" );
+        entry = av_dict_get( program->metadata, "mmt.service_name", NULL, 0 );
+        if( entry && entry->value )
+        {
+            vlc_meta_SetExtra( meta, "ServiceName", entry->value );
+            if( IsUTF8( entry->value ) )
+                vlc_meta_Set( meta, vlc_meta_Title, entry->value );
+        }
+        entry = av_dict_get( program->metadata, "mmt.service_id", NULL, 0 );
+        if( entry && entry->value )
+            vlc_meta_SetExtra( meta, "ServiceId", entry->value );
+        entry = av_dict_get( program->metadata, "mmt.service_provider", NULL, 0 );
+        if( entry && entry->value )
+        {
+            vlc_meta_SetExtra( meta, "ServiceProvider", entry->value );
+            if( IsUTF8( entry->value ) )
+                vlc_meta_Set( meta, vlc_meta_Publisher, entry->value );
+        }
+        entry = av_dict_get( program->metadata, "mmt.network_id", NULL, 0 );
+        if( entry && entry->value )
+            vlc_meta_SetExtra( meta, "ServiceNetworkId", entry->value );
+        entry = av_dict_get( program->metadata, "mmt.tlv_stream_id", NULL, 0 );
+        if( entry && entry->value )
+            vlc_meta_SetExtra( meta, "ServiceTlvStreamId", entry->value );
+        entry = av_dict_get( program->metadata, "mmt.present_event_lang", NULL, 0 );
+        if( entry && entry->value )
+            vlc_meta_SetExtra( meta, "PresentEventLanguage", entry->value );
+        entry = av_dict_get( program->metadata, "mmt.present_event_running_status", NULL, 0 );
+        if( entry && entry->value )
+            vlc_meta_SetExtra( meta, "PresentEventRunningStatus", entry->value );
+        entry = av_dict_get( program->metadata, "mmt.present_event_free_ca", NULL, 0 );
+        if( entry && entry->value )
+            vlc_meta_SetExtra( meta, "PresentEventFreeCA", entry->value );
+        entry = av_dict_get( program->metadata, "mmt.service_type", NULL, 0 );
+        if( entry && entry->value )
+            vlc_meta_SetExtra( meta, "ServiceType", entry->value );
         es_out_Control( p_demux->out, ES_OUT_SET_GROUP_META, program->id, meta );
         vlc_meta_Delete( meta );
+        UpdateMMTProgramEpg( p_demux, program );
     }
+    UpdateMMTInitialNetworkTime( p_demux, b_observed );
 }
 
 static int StreamProgramId( const AVFormatContext *ic, unsigned stream_index )
@@ -449,6 +612,8 @@ int avformat_OpenDemux( vlc_object_t *p_this )
     p_sys->p_title = NULL;
     p_sys->i_seekpoint = 0;
     p_sys->i_update = 0;
+    p_sys->b_mmt_initial_network_time = false;
+    p_sys->i_mmt_last_network_time_us = INT64_MIN;
 
     /* Create I/O wrapper */
     unsigned char * p_io_buffer = av_malloc( AVFORMAT_IOBUFFER_SIZE );
@@ -786,7 +951,7 @@ int avformat_OpenDemux( vlc_object_t *p_this )
         es_format_Clean( &es_fmt );
     }
 
-    UpdateProgramMetadata( p_demux );
+    UpdateProgramMetadata( p_demux, false );
     p_sys->ic->event_flags &= ~AVFMT_EVENT_FLAG_METADATA_UPDATED;
 
     if( p_sys->ic->start_time != (int64_t)AV_NOPTS_VALUE )
@@ -873,7 +1038,7 @@ static int Demux( demux_t *p_demux )
     int i_av_ret = av_read_frame( p_sys->ic, &pkt );
     if( p_sys->ic->event_flags & AVFMT_EVENT_FLAG_METADATA_UPDATED )
     {
-        UpdateProgramMetadata( p_demux );
+        UpdateProgramMetadata( p_demux, true );
         p_sys->ic->event_flags &= ~AVFMT_EVENT_FLAG_METADATA_UPDATED;
     }
     if( i_av_ret )
