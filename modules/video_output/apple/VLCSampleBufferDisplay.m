@@ -603,7 +603,7 @@ static const vlc_fourcc_t sample_buffer_display_subfmts[] = {
     AVSampleBufferDisplayLayer *layer;
     layer = [AVSampleBufferDisplayLayer new];
     layer.delegate = self;
-    layer.videoGravity = AVLayerVideoGravityResizeAspect;
+    layer.videoGravity = AVLayerVideoGravityResize;
     [CATransaction lock];
     layer.needsDisplayOnBoundsChange = YES;
     layer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
