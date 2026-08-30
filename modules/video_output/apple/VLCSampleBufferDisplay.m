@@ -400,6 +400,143 @@ API_AVAILABLE(ios(16.0), tvos(16.0), macosx(13.0))
 
 @end
 
+#pragma mark - VLCHDRToSDRConverter
+
+@interface VLCHDRToSDRConverter : NSObject
+- (CVPixelBufferRef)copyPixelBufferByToneMapping:(CVPixelBufferRef)pixelBuffer
+    CF_RETURNS_RETAINED;
+@end
+
+@implementation VLCHDRToSDRConverter
+{
+    CIContext *_context;
+    CVPixelBufferPoolRef _pool;
+    CGColorSpaceRef _outputColorSpace;
+    size_t _width;
+    size_t _height;
+}
+
+- (instancetype)init
+{
+    self = [super init];
+    if (!self)
+        return nil;
+
+    if (@available(macOS 11.0, iOS 14.1, tvOS 14.0, *)) {
+        _context = [CIContext contextWithOptions:@{
+            kCIContextCacheIntermediates: @NO,
+        }];
+        _outputColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_709);
+        if (!_context || !_outputColorSpace)
+            return nil;
+    } else {
+        return nil;
+    }
+
+    return self;
+}
+
+- (BOOL)preparePoolForPixelBuffer:(CVPixelBufferRef)pixelBuffer
+{
+    const size_t width = CVPixelBufferGetWidth(pixelBuffer);
+    const size_t height = CVPixelBufferGetHeight(pixelBuffer);
+    if (_pool && width == _width && height == _height)
+        return YES;
+
+    if (_pool) {
+        CVPixelBufferPoolRelease(_pool);
+        _pool = NULL;
+    }
+
+    NSDictionary *attributes = @{
+        (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey:
+            @(kCVPixelFormatType_32BGRA),
+        (__bridge NSString *)kCVPixelBufferWidthKey: @(width),
+        (__bridge NSString *)kCVPixelBufferHeightKey: @(height),
+        (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        (__bridge NSString *)kCVPixelBufferMetalCompatibilityKey: @YES,
+    };
+    OSStatus status = CVPixelBufferPoolCreate(
+        NULL, NULL, (__bridge CFDictionaryRef)attributes, &_pool);
+    if (status != noErr)
+        return NO;
+
+    _width = width;
+    _height = height;
+    return YES;
+}
+
+static void CopyGeometryAttachment(CVPixelBufferRef source,
+                                   CVPixelBufferRef destination,
+                                   CFStringRef key)
+{
+    CFTypeRef value;
+    CVAttachmentMode mode = kCVAttachmentMode_ShouldPropagate;
+    if (@available(macOS 12.0, iOS 15.0, tvOS 15.0, *)) {
+        value = CVBufferCopyAttachment(source, key, &mode);
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        value = CVBufferGetAttachment(source, key, &mode);
+        if (value)
+            CFRetain(value);
+#pragma clang diagnostic pop
+    }
+
+    if (value) {
+        CVBufferSetAttachment(destination, key, value, mode);
+        CFRelease(value);
+    }
+}
+
+- (CVPixelBufferRef)copyPixelBufferByToneMapping:(CVPixelBufferRef)pixelBuffer
+{
+    if (![self preparePoolForPixelBuffer:pixelBuffer])
+        return NULL;
+
+    CVPixelBufferRef output = NULL;
+    if (CVPixelBufferPoolCreatePixelBuffer(NULL, _pool, &output) != noErr)
+        return NULL;
+
+    if (@available(macOS 11.0, iOS 14.1, tvOS 14.0, *)) {
+        CIImage *image = [[CIImage alloc] initWithCVPixelBuffer:pixelBuffer
+            options:@{ kCIImageToneMapHDRtoSDR: @YES }];
+        CGRect bounds = CGRectMake(0, 0, _width, _height);
+        [_context render:image
+          toCVPixelBuffer:output
+                  bounds:bounds
+              colorSpace:_outputColorSpace];
+    }
+
+    /* Pool buffers can be reused. Clear any stale metadata, retain only the
+     * source geometry, and describe the converted pixels as SDR Rec. 709. */
+    CVBufferRemoveAllAttachments(output);
+    CopyGeometryAttachment(pixelBuffer, output,
+                           kCVImageBufferCleanApertureKey);
+    CopyGeometryAttachment(pixelBuffer, output,
+                           kCVImageBufferPixelAspectRatioKey);
+    CVBufferSetAttachment(output, kCVImageBufferColorPrimariesKey,
+                          kCVImageBufferColorPrimaries_ITU_R_709_2,
+                          kCVAttachmentMode_ShouldPropagate);
+    CVBufferSetAttachment(output, kCVImageBufferTransferFunctionKey,
+                          kCVImageBufferTransferFunction_ITU_R_709_2,
+                          kCVAttachmentMode_ShouldPropagate);
+    CVBufferSetAttachment(output, kCVImageBufferYCbCrMatrixKey,
+                          kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+                          kCVAttachmentMode_ShouldPropagate);
+    return output;
+}
+
+- (void)dealloc
+{
+    if (_pool)
+        CVPixelBufferPoolRelease(_pool);
+    if (_outputColorSpace)
+        CGColorSpaceRelease(_outputColorSpace);
+}
+
+@end
+
 static vlc_decoder_device * CVPXHoldDecoderDevice(vlc_object_t *o, void *sys)
 {
     VLC_UNUSED(o);
@@ -665,7 +802,9 @@ shouldInheritContentsScale:(CGFloat)newScale
     @property (nonatomic) VLCSampleBufferSubpictureView *spuView;
     @property (nonatomic) VLCSampleBufferSubpicture *subpicture;
     @property (nonatomic) id<VLCPixelBufferRotationContext> rotationContext;
+    @property (nonatomic) VLCHDRToSDRConverter *hdrToSDRConverter;
     @property (atomic) BOOL pictureInPictureStarted;
+    @property (atomic) BOOL hdrToneMappingFailed;
 
     @property (nonatomic, readonly) pip_controller_t *pipcontroller;
 
@@ -713,6 +852,9 @@ shouldInheritContentsScale:(CGFloat)newScale
                                          PictureInPictureStateChanged);
 
     _vd = vd;
+
+    if (var_InheritBool(vd, "samplebuffer-stable-hdr-tone-mapping"))
+        _hdrToSDRConverter = [VLCHDRToSDRConverter new];
 
     return self;
 }
@@ -823,6 +965,17 @@ static void Close(vout_display_t *vd)
     [sys close];
 }
 
+static bool NeedsStableHDRToneMapping(const video_format_t *format)
+{
+    const bool is_hdr =
+        format->transfer == TRANSFER_FUNC_SMPTE_ST2084 ||
+        format->transfer == TRANSFER_FUNC_HLG;
+
+    /* Preserve Dolby Vision's authored per-frame mapping. The stable fallback
+     * is intended for HDR10/HLG sources without authored dynamic metadata. */
+    return is_hdr && !format->dovi.rpu_present;
+}
+
 static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
     VLCSampleBufferDisplay *sys;
     sys = (__bridge VLCSampleBufferDisplay*)vd->sys;
@@ -877,12 +1030,24 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
     if (pixelBuffer != NULL) {
         CVPixelBufferRetain(pixelBuffer);
 
-        /* CMVideoFormatDescriptionCreateForImageBuffer() below only sees
-         * properties attached to the pixel buffer. Keep the source
-         * colorimetry available so AVFoundation can select the correct HDR
-         * gamut conversion and tone mapping path. Existing decoder-provided
-         * attachments, including per-frame HDR metadata, are preserved. */
+        /* Both Core Image and CMVideoFormatDescriptionCreateForImageBuffer()
+         * consume the color properties attached to the pixel buffer. */
         cvpx_attach_mapped_color_properties(pixelBuffer, &dst->format);
+
+        if (sys.hdrToSDRConverter &&
+            NeedsStableHDRToneMapping(&dst->format))
+        {
+            CVPixelBufferRef converted =
+                [sys.hdrToSDRConverter
+                    copyPixelBufferByToneMapping:pixelBuffer];
+            if (converted) {
+                CVPixelBufferRelease(pixelBuffer);
+                pixelBuffer = converted;
+            } else if (!sys.hdrToneMappingFailed) {
+                msg_Warn(vd, "stable HDR-to-SDR tone mapping failed; using system conversion");
+                sys.hdrToneMappingFailed = YES;
+            }
+        }
     }
     picture_Release(dst);
 
@@ -1260,6 +1425,11 @@ static int Open (vout_display_t *vd,
 #define FORCE_LEGACY_DISPLAY_TEXT N_("Force fallback to legacy display")
 #define FORCE_LEGACY_DISPLAY_LONGTEXT N_( \
     "Triggers an initialization failure to allow fallback to any other legacy display.")
+#define STABLE_HDR_TONE_MAPPING_TEXT N_("Use stable HDR-to-SDR tone mapping")
+#define STABLE_HDR_TONE_MAPPING_LONGTEXT N_( \
+    "Convert HDR10 and HLG frames to SDR Rec. 709 with a fixed global tone " \
+    "curve before display. This avoids brightness pumping caused by " \
+    "frame-adaptive HDR metadata.")
 
 #define HELP_TEXT N_("This display handles hardware decoded pixel buffers "\
                      "and renders them in a view/layer. "\
@@ -1275,6 +1445,9 @@ vlc_module_begin()
     add_bool("force-darwin-legacy-display", false,
              FORCE_LEGACY_DISPLAY_TEXT, FORCE_LEGACY_DISPLAY_LONGTEXT)
         change_volatile()
+    add_bool("samplebuffer-stable-hdr-tone-mapping", true,
+             STABLE_HDR_TONE_MAPPING_TEXT,
+             STABLE_HDR_TONE_MAPPING_LONGTEXT)
     set_help(HELP_TEXT)
     set_callback_display(Open, 600)
 vlc_module_end()
