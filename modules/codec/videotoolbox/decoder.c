@@ -2260,7 +2260,6 @@ OpenDecDevice(vlc_decoder_device *device, vlc_window_t *window)
 #define VT_FORCE_CVPX_CHROMA_LONG "Force the VideoToolbox decoder to output \
     CVPixelBuffers in the specified pixel format instead of the default. \
     By default, the best chroma is chosen by the VideoToolbox decoder."
-
 static const char *const chroma_list_values[] =
     {
         "",
@@ -2290,7 +2289,6 @@ vlc_module_begin()
     add_bool("videotoolbox-hw-decoder-only", true, VT_REQUIRE_HW_DEC, VT_REQUIRE_HW_DEC)
     add_string("videotoolbox-cvpx-chroma", "", VT_FORCE_CVPX_CHROMA, VT_FORCE_CVPX_CHROMA_LONG)
         change_string_list(chroma_list_values, chroma_list_names)
-
     /* Deprecated options */
     add_obsolete_bool("videotoolbox-temporal-deinterlacing") // Since 4.0.0
     add_obsolete_bool("videotoolbox") // Since 4.0.0

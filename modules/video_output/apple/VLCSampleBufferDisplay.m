@@ -400,6 +400,217 @@ API_AVAILABLE(ios(16.0), tvos(16.0), macosx(13.0))
 
 @end
 
+#pragma mark - VLCHDRToSDRConverter
+
+@interface VLCHDRToSDRConverter : NSObject
+- (CVPixelBufferRef)copyPixelBufferByToneMapping:(CVPixelBufferRef)pixelBuffer
+                                      useHLGCurve:(BOOL)useHLGCurve
+                               bufferLimitReached:(BOOL *)bufferLimitReached
+    CF_RETURNS_RETAINED;
+@end
+
+/* Six 4K BGRA buffers occupy about 190 MiB. This is enough for rendering
+ * latency without allowing AVSampleBufferDisplayLayer to retain an unbounded
+ * number of converted frames. */
+static const unsigned VLCHDRToSDRMaxBuffers = 6;
+
+static NSString * const VLCHLGToSDRKernelSource = @
+    "kernel vec4 hlgToSDR(__sample pixel) {"
+    "    vec3 rgb = max(pixel.rgb, vec3(0.0));"
+    "    float luminance = max(dot(rgb, vec3(0.2126, 0.7152, 0.0722)), 1.0e-6);"
+    "    const float knee = 0.80;"
+    "    const float range = 1.0 - knee;"
+    "    float mappedLuminance = luminance;"
+    "    if (luminance > knee) {"
+    "        float highlight = luminance - knee;"
+    "        mappedLuminance = knee + highlight / (1.0 + highlight / range);"
+    "    }"
+    "    vec3 mapped = rgb * (mappedLuminance / luminance);"
+    "    return vec4(clamp(mapped, 0.0, 1.0), pixel.a);"
+    "}";
+
+@implementation VLCHDRToSDRConverter
+{
+    CIContext *_context;
+    CIColorKernel *_hlgToSDRKernel;
+    NSDictionary *_poolAuxAttributes;
+    CVPixelBufferPoolRef _pool;
+    CGColorSpaceRef _outputColorSpace;
+    size_t _width;
+    size_t _height;
+}
+
+- (instancetype)init
+{
+    self = [super init];
+    if (!self)
+        return nil;
+
+    _poolAuxAttributes = @{
+        (__bridge NSString *)kCVPixelBufferPoolAllocationThresholdKey:
+            @(VLCHDRToSDRMaxBuffers),
+    };
+
+    if (@available(macOS 11.0, iOS 14.1, tvOS 14.0, *)) {
+        CGColorSpaceRef workingColorSpace =
+            CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
+        if (!workingColorSpace)
+            return nil;
+        _context = [CIContext contextWithOptions:@{
+            kCIContextCacheIntermediates: @NO,
+            kCIContextWorkingColorSpace: (__bridge id)workingColorSpace,
+        }];
+        CGColorSpaceRelease(workingColorSpace);
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        _hlgToSDRKernel = [CIColorKernel kernelWithString:VLCHLGToSDRKernelSource];
+#pragma clang diagnostic pop
+
+        _outputColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_709);
+        if (!_context || !_hlgToSDRKernel || !_outputColorSpace)
+            return nil;
+    } else {
+        return nil;
+    }
+
+    return self;
+}
+
+- (BOOL)preparePoolForPixelBuffer:(CVPixelBufferRef)pixelBuffer
+{
+    const size_t width = CVPixelBufferGetWidth(pixelBuffer);
+    const size_t height = CVPixelBufferGetHeight(pixelBuffer);
+    if (_pool && width == _width && height == _height)
+        return YES;
+
+    if (_pool) {
+        CVPixelBufferPoolRelease(_pool);
+        _pool = NULL;
+    }
+
+    NSDictionary *attributes = @{
+        (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey:
+            @(kCVPixelFormatType_32BGRA),
+        (__bridge NSString *)kCVPixelBufferWidthKey: @(width),
+        (__bridge NSString *)kCVPixelBufferHeightKey: @(height),
+        (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        (__bridge NSString *)kCVPixelBufferMetalCompatibilityKey: @YES,
+    };
+    OSStatus status = CVPixelBufferPoolCreate(
+        NULL, NULL, (__bridge CFDictionaryRef)attributes, &_pool);
+    if (status != noErr)
+        return NO;
+
+    _width = width;
+    _height = height;
+    return YES;
+}
+
+static void CopyGeometryAttachment(CVPixelBufferRef source,
+                                   CVPixelBufferRef destination,
+                                   CFStringRef key)
+{
+    CFTypeRef value;
+    CVAttachmentMode mode = kCVAttachmentMode_ShouldPropagate;
+    if (@available(macOS 12.0, iOS 15.0, tvOS 15.0, *)) {
+        value = CVBufferCopyAttachment(source, key, &mode);
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        value = CVBufferGetAttachment(source, key, &mode);
+        if (value)
+            CFRetain(value);
+#pragma clang diagnostic pop
+    }
+
+    if (value) {
+        CVBufferSetAttachment(destination, key, value, mode);
+        CFRelease(value);
+    }
+}
+
+- (CVPixelBufferRef)copyPixelBufferByToneMapping:(CVPixelBufferRef)pixelBuffer
+                                      useHLGCurve:(BOOL)useHLGCurve
+                               bufferLimitReached:(BOOL *)bufferLimitReached
+{
+    if (bufferLimitReached)
+        *bufferLimitReached = NO;
+
+    if (![self preparePoolForPixelBuffer:pixelBuffer])
+        return NULL;
+
+    CVPixelBufferRef output = NULL;
+    CVReturn status = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(
+        NULL, _pool, (__bridge CFDictionaryRef)_poolAuxAttributes, &output);
+    if (status != kCVReturnSuccess) {
+        if (bufferLimitReached &&
+            status == kCVReturnWouldExceedAllocationThreshold)
+            *bufferLimitReached = YES;
+        return NULL;
+    }
+
+    CFStringRef outputTransferFunction =
+        kCVImageBufferTransferFunction_ITU_R_709_2;
+    if (@available(macOS 11.0, iOS 14.1, tvOS 14.0, *)) {
+        CIImage *image = [[CIImage alloc] initWithCVPixelBuffer:pixelBuffer
+            options:@{ kCIImageToneMapHDRtoSDR: @(!useHLGCurve) }];
+        CGColorSpaceRef renderColorSpace = _outputColorSpace;
+
+        if (useHLGCurve) {
+            /* Core Image has already decoded HLG to its extended-linear
+             * working space. Preserve those midtones, compress only values
+             * near SDR peak white, then explicitly encode the pixels. Passing
+             * no render color space prevents a second, scene-adaptive system
+             * tone map from undoing this fixed curve. */
+            image = [_hlgToSDRKernel applyWithExtent:image.extent
+                                           arguments:@[image]];
+            image = [image imageByApplyingFilter:@"CILinearToSRGBToneCurve"];
+            renderColorSpace = NULL;
+            outputTransferFunction = kCVImageBufferTransferFunction_sRGB;
+        }
+
+        if (!image) {
+            CVPixelBufferRelease(output);
+            return NULL;
+        }
+
+        CGRect bounds = CGRectMake(0, 0, _width, _height);
+        [_context render:image
+          toCVPixelBuffer:output
+                  bounds:bounds
+              colorSpace:renderColorSpace];
+    }
+
+    /* Pool buffers can be reused. Clear any stale metadata, retain only the
+     * source geometry, and describe the converted pixels as SDR Rec. 709. */
+    CVBufferRemoveAllAttachments(output);
+    CopyGeometryAttachment(pixelBuffer, output,
+                           kCVImageBufferCleanApertureKey);
+    CopyGeometryAttachment(pixelBuffer, output,
+                           kCVImageBufferPixelAspectRatioKey);
+    CVBufferSetAttachment(output, kCVImageBufferColorPrimariesKey,
+                          kCVImageBufferColorPrimaries_ITU_R_709_2,
+                          kCVAttachmentMode_ShouldPropagate);
+    CVBufferSetAttachment(output, kCVImageBufferTransferFunctionKey,
+                          outputTransferFunction,
+                          kCVAttachmentMode_ShouldPropagate);
+    CVBufferSetAttachment(output, kCVImageBufferYCbCrMatrixKey,
+                          kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+                          kCVAttachmentMode_ShouldPropagate);
+    return output;
+}
+
+- (void)dealloc
+{
+    if (_pool)
+        CVPixelBufferPoolRelease(_pool);
+    if (_outputColorSpace)
+        CGColorSpaceRelease(_outputColorSpace);
+}
+
+@end
+
 static vlc_decoder_device * CVPXHoldDecoderDevice(vlc_object_t *o, void *sys)
 {
     VLC_UNUSED(o);
@@ -665,7 +876,12 @@ shouldInheritContentsScale:(CGFloat)newScale
     @property (nonatomic) VLCSampleBufferSubpictureView *spuView;
     @property (nonatomic) VLCSampleBufferSubpicture *subpicture;
     @property (nonatomic) id<VLCPixelBufferRotationContext> rotationContext;
+    @property (nonatomic) VLCHDRToSDRConverter *hdrToSDRConverter;
     @property (atomic) BOOL pictureInPictureStarted;
+    @property (atomic) BOOL hdrToneMappingFailed;
+#if TARGET_OS_OSX
+    @property (atomic) BOOL displaySupportsEDR;
+#endif
 
     @property (nonatomic, readonly) pip_controller_t *pipcontroller;
 
@@ -674,9 +890,60 @@ shouldInheritContentsScale:(CGFloat)newScale
     - (instancetype)initWithVoutDisplay:(vout_display_t *)vd;
     - (void)placeVideo:(vout_display_place_t)newPlace;
     - (void)handlePictureInPictureStateChange:(BOOL)isStarted;
+#if TARGET_OS_OSX
+    - (void)startObservingDisplayDynamicRange;
+    - (void)stopObservingDisplayDynamicRange;
+#endif
 @end
 
 @implementation VLCSampleBufferDisplay
+
+#if TARGET_OS_OSX
+- (void)updateDisplayDynamicRange:(NSNotification *)notification
+{
+    VLC_UNUSED(notification);
+    NSScreen *screen = self.displayView.window.screen;
+    BOOL supportsEDR = NO;
+    if (@available(macOS 10.15, *))
+        supportsEDR =
+            screen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1.0;
+
+    if (self.displaySupportsEDR == supportsEDR)
+        return;
+
+    self.displaySupportsEDR = supportsEDR;
+
+    /* Discard frames prepared for the previous display mode. The next frame
+     * will carry either the original HDR signal or the mapped SDR signal. */
+    @synchronized(self.displayLayer) {
+        if (self.displayLayer) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            [self.displayLayer flush];
+#pragma clang diagnostic pop
+        }
+    }
+}
+
+- (void)startObservingDisplayDynamicRange
+{
+    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+    [center addObserver:self
+               selector:@selector(updateDisplayDynamicRange:)
+                   name:NSWindowDidChangeScreenNotification
+                 object:nil];
+    [center addObserver:self
+               selector:@selector(updateDisplayDynamicRange:)
+                   name:NSApplicationDidChangeScreenParametersNotification
+                 object:nil];
+    [self updateDisplayDynamicRange:nil];
+}
+
+- (void)stopObservingDisplayDynamicRange
+{
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+}
+#endif
 
 - (id<VLCPixelBufferRotationContext>)rotationContext
 {
@@ -713,6 +980,9 @@ shouldInheritContentsScale:(CGFloat)newScale
                                          PictureInPictureStateChanged);
 
     _vd = vd;
+
+    if (var_InheritBool(vd, "samplebuffer-stable-hdr-tone-mapping"))
+        _hdrToSDRConverter = [VLCHDRToSDRConverter new];
 
     return self;
 }
@@ -772,6 +1042,9 @@ shouldInheritContentsScale:(CGFloat)newScale
 
         sys.displayView = displayView;
         sys.spuView = spuView;
+#if TARGET_OS_OSX
+        [sys startObservingDisplayDynamicRange];
+#endif
         @synchronized(sys.displayLayer) {
             sys.displayLayer = displayView.displayLayer;
         }
@@ -786,6 +1059,9 @@ shouldInheritContentsScale:(CGFloat)newScale
 - (void)close {
     VLCSampleBufferDisplay *sys = self;
     dispatch_async(dispatch_get_main_queue(), ^{
+#if TARGET_OS_OSX
+        [sys stopObservingDisplayDynamicRange];
+#endif
         [sys.displayView removeFromSuperview];
         [sys.spuView removeFromSuperview];
     });
@@ -823,9 +1099,59 @@ static void Close(vout_display_t *vd)
     [sys close];
 }
 
+static bool NeedsStableHDRToneMapping(const video_format_t *format)
+{
+    const bool is_hdr =
+        format->transfer == TRANSFER_FUNC_SMPTE_ST2084 ||
+        format->transfer == TRANSFER_FUNC_HLG;
+
+    /* Preserve Dolby Vision's authored per-frame mapping. The stable fallback
+     * is intended for HDR10/HLG sources without authored dynamic metadata. */
+    return is_hdr && !format->dovi.rpu_present;
+}
+
+static bool ShouldApplyStableHDRToneMapping(VLCSampleBufferDisplay *sys,
+                                            const video_format_t *format)
+{
+    if (!NeedsStableHDRToneMapping(format))
+        return false;
+#if TARGET_OS_OSX
+    /* AVSampleBufferDisplayLayer can present the original 10-bit HDR signal
+     * on an EDR-capable screen. Apply the fixed SDR mapping only when the
+     * window is currently on an SDR screen. */
+    return !sys.displaySupportsEDR;
+#else
+    return true;
+#endif
+}
+
+static bool DisplayLayerCanAcceptMoreMediaData(
+    AVSampleBufferDisplayLayer *displayLayer)
+{
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return displayLayer.status == AVQueuedSampleBufferRenderingStatusFailed ||
+           displayLayer.readyForMoreMediaData;
+#pragma clang diagnostic pop
+}
+
 static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
     VLCSampleBufferDisplay *sys;
     sys = (__bridge VLCSampleBufferDisplay*)vd->sys;
+
+    @synchronized(sys.displayLayer) {
+        if (sys.displayLayer == nil)
+            return;
+
+        /* Tone mapping detaches frames from the decoder's bounded surface
+         * pool. Do not create another full-resolution buffer while the
+         * display queue is already full. A failed layer is allowed through so
+         * the existing flush-and-retry path can recover it below. */
+        if (sys.hdrToSDRConverter &&
+            ShouldApplyStableHDRToneMapping(sys, vd->fmt) &&
+            !DisplayLayerCanAcceptMoreMediaData(sys.displayLayer))
+            return;
+    }
 
     switch (vd->fmt->orientation) {
     case ORIENT_HFLIPPED:
@@ -861,11 +1187,6 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
         break;
     }
 
-    @synchronized(sys.displayLayer) {
-        if (sys.displayLayer == nil)
-            return;
-    }
-
     picture_Hold(pic);
 
     picture_t *dst = pic;
@@ -873,12 +1194,42 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
         dst = sys->converter->ops->filter_video(sys->converter, pic);
     }
 
+    BOOL dropFrame = NO;
     CVPixelBufferRef pixelBuffer = cvpxpic_get_ref(dst);
-    CVPixelBufferRetain(pixelBuffer);
+    if (pixelBuffer != NULL) {
+        CVPixelBufferRetain(pixelBuffer);
+
+        /* Both Core Image and CMVideoFormatDescriptionCreateForImageBuffer()
+         * consume the color properties attached to the pixel buffer. */
+        cvpx_attach_mapped_color_properties(pixelBuffer, &dst->format);
+
+        if (sys.hdrToSDRConverter &&
+            ShouldApplyStableHDRToneMapping(sys, &dst->format))
+        {
+            CVPixelBufferRef converted;
+            @autoreleasepool {
+                converted = [sys.hdrToSDRConverter
+                    copyPixelBufferByToneMapping:pixelBuffer
+                                      useHLGCurve:dst->format.transfer == TRANSFER_FUNC_HLG
+                               bufferLimitReached:&dropFrame];
+            }
+            if (converted) {
+                CVPixelBufferRelease(pixelBuffer);
+                pixelBuffer = converted;
+            } else if (dropFrame) {
+                CVPixelBufferRelease(pixelBuffer);
+                pixelBuffer = NULL;
+            } else if (!sys.hdrToneMappingFailed) {
+                msg_Warn(vd, "stable HDR-to-SDR tone mapping failed; using system conversion");
+                sys.hdrToneMappingFailed = YES;
+            }
+        }
+    }
     picture_Release(dst);
 
     if (pixelBuffer == NULL) {
-        msg_Err(vd, "No pixelBuffer ref attached to pic!");
+        if (!dropFrame)
+            msg_Err(vd, "No pixelBuffer ref attached to pic!");
         return;
     }
 
@@ -1251,6 +1602,12 @@ static int Open (vout_display_t *vd,
 #define FORCE_LEGACY_DISPLAY_TEXT N_("Force fallback to legacy display")
 #define FORCE_LEGACY_DISPLAY_LONGTEXT N_( \
     "Triggers an initialization failure to allow fallback to any other legacy display.")
+#define STABLE_HDR_TONE_MAPPING_TEXT N_("Use stable HDR-to-SDR tone mapping")
+#define STABLE_HDR_TONE_MAPPING_LONGTEXT N_( \
+    "On SDR displays, convert HDR10 and HLG frames to SDR Rec. 709. HLG " \
+    "midtones retain their original brightness and only highlights use a " \
+    "fixed shoulder, avoiding both color washout and brightness pumping. " \
+    "HDR-capable displays receive the original HDR signal.")
 
 #define HELP_TEXT N_("This display handles hardware decoded pixel buffers "\
                      "and renders them in a view/layer. "\
@@ -1266,6 +1623,9 @@ vlc_module_begin()
     add_bool("force-darwin-legacy-display", false,
              FORCE_LEGACY_DISPLAY_TEXT, FORCE_LEGACY_DISPLAY_LONGTEXT)
         change_volatile()
+    add_bool("samplebuffer-stable-hdr-tone-mapping", true,
+             STABLE_HDR_TONE_MAPPING_TEXT,
+             STABLE_HDR_TONE_MAPPING_LONGTEXT)
     set_help(HELP_TEXT)
     set_callback_display(Open, 600)
 vlc_module_end()
