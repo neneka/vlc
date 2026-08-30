@@ -53,6 +53,19 @@
 #define VT_ALIGNMENT 16
 #define VT_RESTART_MAX 1
 
+#if (TARGET_OS_OSX && defined(__MAC_14_0) && \
+     __MAC_OS_X_VERSION_MAX_ALLOWED >= 140000) || \
+    (TARGET_OS_IOS && defined(__IPHONE_17_0) && \
+     __IPHONE_OS_VERSION_MAX_ALLOWED >= 170000) || \
+    (TARGET_OS_TV && defined(__TVOS_17_0) && \
+     __TV_OS_VERSION_MAX_ALLOWED >= 170000) || \
+    (defined(TARGET_OS_VISION) && TARGET_OS_VISION && \
+     defined(__VISIONOS_1_0) && __VISION_OS_VERSION_MAX_ALLOWED >= 10000)
+# define VLC_VT_HAS_HDR_METADATA_GENERATION 1
+#else
+# define VLC_VT_HAS_HDR_METADATA_GENERATION 0
+#endif
+
 #pragma mark - local prototypes
 
 enum vtsession_status
@@ -78,6 +91,20 @@ static Boolean deviceSupportsHEVC();
 static bool deviceSupports42010bitRendering();
 static Boolean deviceSupportsAdvancedProfiles();
 static Boolean deviceSupportsAdvancedLevels();
+
+#if VLC_VT_HAS_HDR_METADATA_GENERATION
+static bool NeedsGeneratedHDRMetadata(const video_format_t *fmt)
+{
+    const bool has_hdr_transfer =
+        fmt->transfer == TRANSFER_FUNC_SMPTE_ST2084 ||
+        fmt->transfer == TRANSFER_FUNC_HLG;
+
+    /* Dolby Vision already carries per-frame display metadata, which
+     * VideoToolbox propagates by default. Do not replace it with generated
+     * metadata from the base-layer pixels. */
+    return has_hdr_transfer && !fmt->dovi.rpu_present;
+}
+#endif
 
 #pragma mark - decoder structure
 
@@ -1246,6 +1273,26 @@ static int StartVideoToolbox(decoder_t *p_dec)
     if (HandleVTStatus(p_dec, status, NULL) != VLC_SUCCESS)
         return VLC_EGENERIC;
 
+#if VLC_VT_HAS_HDR_METADATA_GENERATION
+    if (NeedsGeneratedHDRMetadata(&p_dec->fmt_out.video) &&
+        var_InheritBool(p_dec, "videotoolbox-generate-hdr-metadata"))
+    {
+        if (__builtin_available(macOS 14.0, iOS 17.0, tvOS 17.0,
+                                visionOS 1.0, *))
+        {
+            status = VTSessionSetProperty(
+                p_sys->session,
+                kVTDecompressionPropertyKey_GeneratePerFrameHDRDisplayMetadata,
+                kCFBooleanTrue);
+            if (status != noErr)
+                msg_Warn(p_dec, "failed to enable per-frame HDR metadata generation (%d)",
+                         (int) status);
+            else
+                msg_Dbg(p_dec, "enabled per-frame HDR metadata generation");
+        }
+    }
+#endif
+
     return VLC_SUCCESS;
 
 error:
@@ -2260,6 +2307,12 @@ OpenDecDevice(vlc_decoder_device *device, vlc_window_t *window)
 #define VT_FORCE_CVPX_CHROMA_LONG "Force the VideoToolbox decoder to output \
     CVPixelBuffers in the specified pixel format instead of the default. \
     By default, the best chroma is chosen by the VideoToolbox decoder."
+#define VT_GENERATE_HDR_METADATA N_("Generate per-frame HDR display metadata")
+#define VT_GENERATE_HDR_METADATA_LONG N_( \
+    "Analyze HDR frames and attach per-frame display metadata so Apple display " \
+    "APIs can adapt tone mapping to the actual scene instead of applying a " \
+    "conservative static conversion. This can improve HDR-to-SDR brightness " \
+    "and color volume at an additional processing cost.")
 
 static const char *const chroma_list_values[] =
     {
@@ -2290,6 +2343,8 @@ vlc_module_begin()
     add_bool("videotoolbox-hw-decoder-only", true, VT_REQUIRE_HW_DEC, VT_REQUIRE_HW_DEC)
     add_string("videotoolbox-cvpx-chroma", "", VT_FORCE_CVPX_CHROMA, VT_FORCE_CVPX_CHROMA_LONG)
         change_string_list(chroma_list_values, chroma_list_names)
+    add_bool("videotoolbox-generate-hdr-metadata", true,
+             VT_GENERATE_HDR_METADATA, VT_GENERATE_HDR_METADATA_LONG)
 
     /* Deprecated options */
     add_obsolete_bool("videotoolbox-temporal-deinterlacing") // Since 4.0.0

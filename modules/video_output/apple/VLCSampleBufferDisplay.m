@@ -874,7 +874,16 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
     }
 
     CVPixelBufferRef pixelBuffer = cvpxpic_get_ref(dst);
-    CVPixelBufferRetain(pixelBuffer);
+    if (pixelBuffer != NULL) {
+        CVPixelBufferRetain(pixelBuffer);
+
+        /* CMVideoFormatDescriptionCreateForImageBuffer() below only sees
+         * properties attached to the pixel buffer. Keep the source
+         * colorimetry available so AVFoundation can select the correct HDR
+         * gamut conversion and tone mapping path. Existing decoder-provided
+         * attachments, including per-frame HDR metadata, are preserved. */
+        cvpx_attach_mapped_color_properties(pixelBuffer, &dst->format);
+    }
     picture_Release(dst);
 
     if (pixelBuffer == NULL) {
