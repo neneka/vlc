@@ -404,12 +404,29 @@ API_AVAILABLE(ios(16.0), tvos(16.0), macosx(13.0))
 
 @interface VLCHDRToSDRConverter : NSObject
 - (CVPixelBufferRef)copyPixelBufferByToneMapping:(CVPixelBufferRef)pixelBuffer
+                                      useHLGCurve:(BOOL)useHLGCurve
     CF_RETURNS_RETAINED;
 @end
+
+static NSString * const VLCHLGToSDRKernelSource = @
+    "kernel vec4 hlgToSDR(__sample pixel) {"
+    "    vec3 rgb = max(pixel.rgb, vec3(0.0));"
+    "    float luminance = max(dot(rgb, vec3(0.2126, 0.7152, 0.0722)), 1.0e-6);"
+    "    const float knee = 0.80;"
+    "    const float range = 1.0 - knee;"
+    "    float mappedLuminance = luminance;"
+    "    if (luminance > knee) {"
+    "        float highlight = luminance - knee;"
+    "        mappedLuminance = knee + highlight / (1.0 + highlight / range);"
+    "    }"
+    "    vec3 mapped = rgb * (mappedLuminance / luminance);"
+    "    return vec4(clamp(mapped, 0.0, 1.0), pixel.a);"
+    "}";
 
 @implementation VLCHDRToSDRConverter
 {
     CIContext *_context;
+    CIColorKernel *_hlgToSDRKernel;
     CVPixelBufferPoolRef _pool;
     CGColorSpaceRef _outputColorSpace;
     size_t _width;
@@ -423,11 +440,23 @@ API_AVAILABLE(ios(16.0), tvos(16.0), macosx(13.0))
         return nil;
 
     if (@available(macOS 11.0, iOS 14.1, tvOS 14.0, *)) {
+        CGColorSpaceRef workingColorSpace =
+            CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
+        if (!workingColorSpace)
+            return nil;
         _context = [CIContext contextWithOptions:@{
             kCIContextCacheIntermediates: @NO,
+            kCIContextWorkingColorSpace: (__bridge id)workingColorSpace,
         }];
+        CGColorSpaceRelease(workingColorSpace);
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        _hlgToSDRKernel = [CIColorKernel kernelWithString:VLCHLGToSDRKernelSource];
+#pragma clang diagnostic pop
+
         _outputColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_709);
-        if (!_context || !_outputColorSpace)
+        if (!_context || !_hlgToSDRKernel || !_outputColorSpace)
             return nil;
     } else {
         return nil;
@@ -490,6 +519,7 @@ static void CopyGeometryAttachment(CVPixelBufferRef source,
 }
 
 - (CVPixelBufferRef)copyPixelBufferByToneMapping:(CVPixelBufferRef)pixelBuffer
+                                      useHLGCurve:(BOOL)useHLGCurve
 {
     if (![self preparePoolForPixelBuffer:pixelBuffer])
         return NULL;
@@ -498,14 +528,36 @@ static void CopyGeometryAttachment(CVPixelBufferRef source,
     if (CVPixelBufferPoolCreatePixelBuffer(NULL, _pool, &output) != noErr)
         return NULL;
 
+    CFStringRef outputTransferFunction =
+        kCVImageBufferTransferFunction_ITU_R_709_2;
     if (@available(macOS 11.0, iOS 14.1, tvOS 14.0, *)) {
         CIImage *image = [[CIImage alloc] initWithCVPixelBuffer:pixelBuffer
-            options:@{ kCIImageToneMapHDRtoSDR: @YES }];
+            options:@{ kCIImageToneMapHDRtoSDR: @(!useHLGCurve) }];
+        CGColorSpaceRef renderColorSpace = _outputColorSpace;
+
+        if (useHLGCurve) {
+            /* Core Image has already decoded HLG to its extended-linear
+             * working space. Preserve those midtones, compress only values
+             * near SDR peak white, then explicitly encode the pixels. Passing
+             * no render color space prevents a second, scene-adaptive system
+             * tone map from undoing this fixed curve. */
+            image = [_hlgToSDRKernel applyWithExtent:image.extent
+                                           arguments:@[image]];
+            image = [image imageByApplyingFilter:@"CILinearToSRGBToneCurve"];
+            renderColorSpace = NULL;
+            outputTransferFunction = kCVImageBufferTransferFunction_sRGB;
+        }
+
+        if (!image) {
+            CVPixelBufferRelease(output);
+            return NULL;
+        }
+
         CGRect bounds = CGRectMake(0, 0, _width, _height);
         [_context render:image
           toCVPixelBuffer:output
                   bounds:bounds
-              colorSpace:_outputColorSpace];
+              colorSpace:renderColorSpace];
     }
 
     /* Pool buffers can be reused. Clear any stale metadata, retain only the
@@ -519,7 +571,7 @@ static void CopyGeometryAttachment(CVPixelBufferRef source,
                           kCVImageBufferColorPrimaries_ITU_R_709_2,
                           kCVAttachmentMode_ShouldPropagate);
     CVBufferSetAttachment(output, kCVImageBufferTransferFunctionKey,
-                          kCVImageBufferTransferFunction_ITU_R_709_2,
+                          outputTransferFunction,
                           kCVAttachmentMode_ShouldPropagate);
     CVBufferSetAttachment(output, kCVImageBufferYCbCrMatrixKey,
                           kCVImageBufferYCbCrMatrix_ITU_R_709_2,
@@ -1039,7 +1091,8 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
         {
             CVPixelBufferRef converted =
                 [sys.hdrToSDRConverter
-                    copyPixelBufferByToneMapping:pixelBuffer];
+                    copyPixelBufferByToneMapping:pixelBuffer
+                                      useHLGCurve:dst->format.transfer == TRANSFER_FUNC_HLG];
             if (converted) {
                 CVPixelBufferRelease(pixelBuffer);
                 pixelBuffer = converted;
@@ -1427,9 +1480,9 @@ static int Open (vout_display_t *vd,
     "Triggers an initialization failure to allow fallback to any other legacy display.")
 #define STABLE_HDR_TONE_MAPPING_TEXT N_("Use stable HDR-to-SDR tone mapping")
 #define STABLE_HDR_TONE_MAPPING_LONGTEXT N_( \
-    "Convert HDR10 and HLG frames to SDR Rec. 709 with a fixed global tone " \
-    "curve before display. This avoids brightness pumping caused by " \
-    "frame-adaptive HDR metadata.")
+    "Convert HDR10 and HLG frames to SDR Rec. 709 before display. HLG " \
+    "midtones retain their original brightness and only highlights use a " \
+    "fixed shoulder, avoiding both color washout and brightness pumping.")
 
 #define HELP_TEXT N_("This display handles hardware decoded pixel buffers "\
                      "and renders them in a view/layer. "\
