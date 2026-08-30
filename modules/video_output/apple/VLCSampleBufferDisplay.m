@@ -899,11 +899,29 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
         }
     }
 
+    unsigned aspectRatioNum = vd->source->i_sar_num;
+    unsigned aspectRatioDen = vd->source->i_sar_den;
+#if TARGET_OS_OSX
+    /* VideoToolbox can return an aligned pixel buffer whose dimensions differ
+     * from the visible video. Preserve the visible display aspect ratio for
+     * AVSampleBufferDisplayLayer's private content layer. */
+    video_format_t source;
+    video_format_ApplyRotation(&source, vd->source);
+    uint64_t aspectRatioScaledNum =
+        (uint64_t)source.i_visible_width * source.i_sar_num *
+        CVPixelBufferGetHeight(pixelBuffer);
+    uint64_t aspectRatioScaledDen =
+        (uint64_t)source.i_visible_height * source.i_sar_den *
+        CVPixelBufferGetWidth(pixelBuffer);
+    vlc_ureduce(&aspectRatioNum, &aspectRatioDen,
+                aspectRatioScaledNum, aspectRatioScaledDen, 50000);
+#endif
+
     id aspectRatio = @{
         (__bridge NSString*)kCVImageBufferPixelAspectRatioHorizontalSpacingKey:
-            @(vd->source->i_sar_num),
+            @(aspectRatioNum),
         (__bridge NSString*)kCVImageBufferPixelAspectRatioVerticalSpacingKey:
-            @(vd->source->i_sar_den)
+            @(aspectRatioDen)
     };
 
     CVBufferSetAttachment(
