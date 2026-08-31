@@ -405,8 +405,14 @@ API_AVAILABLE(ios(16.0), tvos(16.0), macosx(13.0))
 @interface VLCHDRToSDRConverter : NSObject
 - (CVPixelBufferRef)copyPixelBufferByToneMapping:(CVPixelBufferRef)pixelBuffer
                                       useHLGCurve:(BOOL)useHLGCurve
+                               bufferLimitReached:(BOOL *)bufferLimitReached
     CF_RETURNS_RETAINED;
 @end
+
+/* Six 4K BGRA buffers occupy about 190 MiB. This is enough for rendering
+ * latency without allowing AVSampleBufferDisplayLayer to retain an unbounded
+ * number of converted frames. */
+static const unsigned VLCHDRToSDRMaxBuffers = 6;
 
 static NSString * const VLCHLGToSDRKernelSource = @
     "kernel vec4 hlgToSDR(__sample pixel) {"
@@ -427,6 +433,7 @@ static NSString * const VLCHLGToSDRKernelSource = @
 {
     CIContext *_context;
     CIColorKernel *_hlgToSDRKernel;
+    NSDictionary *_poolAuxAttributes;
     CVPixelBufferPoolRef _pool;
     CGColorSpaceRef _outputColorSpace;
     size_t _width;
@@ -438,6 +445,11 @@ static NSString * const VLCHLGToSDRKernelSource = @
     self = [super init];
     if (!self)
         return nil;
+
+    _poolAuxAttributes = @{
+        (__bridge NSString *)kCVPixelBufferPoolAllocationThresholdKey:
+            @(VLCHDRToSDRMaxBuffers),
+    };
 
     if (@available(macOS 11.0, iOS 14.1, tvOS 14.0, *)) {
         CGColorSpaceRef workingColorSpace =
@@ -520,13 +532,23 @@ static void CopyGeometryAttachment(CVPixelBufferRef source,
 
 - (CVPixelBufferRef)copyPixelBufferByToneMapping:(CVPixelBufferRef)pixelBuffer
                                       useHLGCurve:(BOOL)useHLGCurve
+                               bufferLimitReached:(BOOL *)bufferLimitReached
 {
+    if (bufferLimitReached)
+        *bufferLimitReached = NO;
+
     if (![self preparePoolForPixelBuffer:pixelBuffer])
         return NULL;
 
     CVPixelBufferRef output = NULL;
-    if (CVPixelBufferPoolCreatePixelBuffer(NULL, _pool, &output) != noErr)
+    CVReturn status = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(
+        NULL, _pool, (__bridge CFDictionaryRef)_poolAuxAttributes, &output);
+    if (status != kCVReturnSuccess) {
+        if (bufferLimitReached &&
+            status == kCVReturnWouldExceedAllocationThreshold)
+            *bufferLimitReached = YES;
         return NULL;
+    }
 
     CFStringRef outputTransferFunction =
         kCVImageBufferTransferFunction_ITU_R_709_2;
@@ -1028,9 +1050,33 @@ static bool NeedsStableHDRToneMapping(const video_format_t *format)
     return is_hdr && !format->dovi.rpu_present;
 }
 
+static bool DisplayLayerCanAcceptMoreMediaData(
+    AVSampleBufferDisplayLayer *displayLayer)
+{
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return displayLayer.status == AVQueuedSampleBufferRenderingStatusFailed ||
+           displayLayer.readyForMoreMediaData;
+#pragma clang diagnostic pop
+}
+
 static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
     VLCSampleBufferDisplay *sys;
     sys = (__bridge VLCSampleBufferDisplay*)vd->sys;
+
+    @synchronized(sys.displayLayer) {
+        if (sys.displayLayer == nil)
+            return;
+
+        /* Tone mapping detaches frames from the decoder's bounded surface
+         * pool. Do not create another full-resolution buffer while the
+         * display queue is already full. A failed layer is allowed through so
+         * the existing flush-and-retry path can recover it below. */
+        if (sys.hdrToSDRConverter &&
+            NeedsStableHDRToneMapping(vd->fmt) &&
+            !DisplayLayerCanAcceptMoreMediaData(sys.displayLayer))
+            return;
+    }
 
     switch (vd->fmt->orientation) {
     case ORIENT_HFLIPPED:
@@ -1066,11 +1112,6 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
         break;
     }
 
-    @synchronized(sys.displayLayer) {
-        if (sys.displayLayer == nil)
-            return;
-    }
-
     picture_Hold(pic);
 
     picture_t *dst = pic;
@@ -1078,6 +1119,7 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
         dst = sys->converter->ops->filter_video(sys->converter, pic);
     }
 
+    BOOL dropFrame = NO;
     CVPixelBufferRef pixelBuffer = cvpxpic_get_ref(dst);
     if (pixelBuffer != NULL) {
         CVPixelBufferRetain(pixelBuffer);
@@ -1089,13 +1131,19 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
         if (sys.hdrToSDRConverter &&
             NeedsStableHDRToneMapping(&dst->format))
         {
-            CVPixelBufferRef converted =
-                [sys.hdrToSDRConverter
+            CVPixelBufferRef converted;
+            @autoreleasepool {
+                converted = [sys.hdrToSDRConverter
                     copyPixelBufferByToneMapping:pixelBuffer
-                                      useHLGCurve:dst->format.transfer == TRANSFER_FUNC_HLG];
+                                      useHLGCurve:dst->format.transfer == TRANSFER_FUNC_HLG
+                               bufferLimitReached:&dropFrame];
+            }
             if (converted) {
                 CVPixelBufferRelease(pixelBuffer);
                 pixelBuffer = converted;
+            } else if (dropFrame) {
+                CVPixelBufferRelease(pixelBuffer);
+                pixelBuffer = NULL;
             } else if (!sys.hdrToneMappingFailed) {
                 msg_Warn(vd, "stable HDR-to-SDR tone mapping failed; using system conversion");
                 sys.hdrToneMappingFailed = YES;
@@ -1105,7 +1153,8 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
     picture_Release(dst);
 
     if (pixelBuffer == NULL) {
-        msg_Err(vd, "No pixelBuffer ref attached to pic!");
+        if (!dropFrame)
+            msg_Err(vd, "No pixelBuffer ref attached to pic!");
         return;
     }
 
