@@ -879,6 +879,9 @@ shouldInheritContentsScale:(CGFloat)newScale
     @property (nonatomic) VLCHDRToSDRConverter *hdrToSDRConverter;
     @property (atomic) BOOL pictureInPictureStarted;
     @property (atomic) BOOL hdrToneMappingFailed;
+#if TARGET_OS_OSX
+    @property (atomic) BOOL displaySupportsEDR;
+#endif
 
     @property (nonatomic, readonly) pip_controller_t *pipcontroller;
 
@@ -887,9 +890,60 @@ shouldInheritContentsScale:(CGFloat)newScale
     - (instancetype)initWithVoutDisplay:(vout_display_t *)vd;
     - (void)placeVideo:(vout_display_place_t)newPlace;
     - (void)handlePictureInPictureStateChange:(BOOL)isStarted;
+#if TARGET_OS_OSX
+    - (void)startObservingDisplayDynamicRange;
+    - (void)stopObservingDisplayDynamicRange;
+#endif
 @end
 
 @implementation VLCSampleBufferDisplay
+
+#if TARGET_OS_OSX
+- (void)updateDisplayDynamicRange:(NSNotification *)notification
+{
+    VLC_UNUSED(notification);
+    NSScreen *screen = self.displayView.window.screen;
+    BOOL supportsEDR = NO;
+    if (@available(macOS 10.15, *))
+        supportsEDR =
+            screen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1.0;
+
+    if (self.displaySupportsEDR == supportsEDR)
+        return;
+
+    self.displaySupportsEDR = supportsEDR;
+
+    /* Discard frames prepared for the previous display mode. The next frame
+     * will carry either the original HDR signal or the mapped SDR signal. */
+    @synchronized(self.displayLayer) {
+        if (self.displayLayer) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            [self.displayLayer flush];
+#pragma clang diagnostic pop
+        }
+    }
+}
+
+- (void)startObservingDisplayDynamicRange
+{
+    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+    [center addObserver:self
+               selector:@selector(updateDisplayDynamicRange:)
+                   name:NSWindowDidChangeScreenNotification
+                 object:nil];
+    [center addObserver:self
+               selector:@selector(updateDisplayDynamicRange:)
+                   name:NSApplicationDidChangeScreenParametersNotification
+                 object:nil];
+    [self updateDisplayDynamicRange:nil];
+}
+
+- (void)stopObservingDisplayDynamicRange
+{
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+}
+#endif
 
 - (id<VLCPixelBufferRotationContext>)rotationContext
 {
@@ -988,6 +1042,9 @@ shouldInheritContentsScale:(CGFloat)newScale
 
         sys.displayView = displayView;
         sys.spuView = spuView;
+#if TARGET_OS_OSX
+        [sys startObservingDisplayDynamicRange];
+#endif
         @synchronized(sys.displayLayer) {
             sys.displayLayer = displayView.displayLayer;
         }
@@ -1002,6 +1059,9 @@ shouldInheritContentsScale:(CGFloat)newScale
 - (void)close {
     VLCSampleBufferDisplay *sys = self;
     dispatch_async(dispatch_get_main_queue(), ^{
+#if TARGET_OS_OSX
+        [sys stopObservingDisplayDynamicRange];
+#endif
         [sys.displayView removeFromSuperview];
         [sys.spuView removeFromSuperview];
     });
@@ -1050,6 +1110,21 @@ static bool NeedsStableHDRToneMapping(const video_format_t *format)
     return is_hdr && !format->dovi.rpu_present;
 }
 
+static bool ShouldApplyStableHDRToneMapping(VLCSampleBufferDisplay *sys,
+                                            const video_format_t *format)
+{
+    if (!NeedsStableHDRToneMapping(format))
+        return false;
+#if TARGET_OS_OSX
+    /* AVSampleBufferDisplayLayer can present the original 10-bit HDR signal
+     * on an EDR-capable screen. Apply the fixed SDR mapping only when the
+     * window is currently on an SDR screen. */
+    return !sys.displaySupportsEDR;
+#else
+    return true;
+#endif
+}
+
 static bool DisplayLayerCanAcceptMoreMediaData(
     AVSampleBufferDisplayLayer *displayLayer)
 {
@@ -1073,7 +1148,7 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
          * display queue is already full. A failed layer is allowed through so
          * the existing flush-and-retry path can recover it below. */
         if (sys.hdrToSDRConverter &&
-            NeedsStableHDRToneMapping(vd->fmt) &&
+            ShouldApplyStableHDRToneMapping(sys, vd->fmt) &&
             !DisplayLayerCanAcceptMoreMediaData(sys.displayLayer))
             return;
     }
@@ -1129,7 +1204,7 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
         cvpx_attach_mapped_color_properties(pixelBuffer, &dst->format);
 
         if (sys.hdrToSDRConverter &&
-            NeedsStableHDRToneMapping(&dst->format))
+            ShouldApplyStableHDRToneMapping(sys, &dst->format))
         {
             CVPixelBufferRef converted;
             @autoreleasepool {
@@ -1529,9 +1604,10 @@ static int Open (vout_display_t *vd,
     "Triggers an initialization failure to allow fallback to any other legacy display.")
 #define STABLE_HDR_TONE_MAPPING_TEXT N_("Use stable HDR-to-SDR tone mapping")
 #define STABLE_HDR_TONE_MAPPING_LONGTEXT N_( \
-    "Convert HDR10 and HLG frames to SDR Rec. 709 before display. HLG " \
+    "On SDR displays, convert HDR10 and HLG frames to SDR Rec. 709. HLG " \
     "midtones retain their original brightness and only highlights use a " \
-    "fixed shoulder, avoiding both color washout and brightness pumping.")
+    "fixed shoulder, avoiding both color washout and brightness pumping. " \
+    "HDR-capable displays receive the original HDR signal.")
 
 #define HELP_TEXT N_("This display handles hardware decoded pixel buffers "\
                      "and renders them in a view/layer. "\
