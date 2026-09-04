@@ -267,6 +267,7 @@ ffmpeg: ffmpeg-$(FFMPEG_VERSION).tar.xz .sum-ffmpeg
 	$(APPLY) $(SRC)/ffmpeg/9012-avformat-mmtp-mh-service-event-and-tot-metadata.patch
 	$(APPLY) $(SRC)/ffmpeg/9013-avformat-mmttlv-derive-service-and-media-zero-network-time.patch
 	$(APPLY) $(SRC)/ffmpeg/9014-avformat-mmtp-fix-mh-sdt-service-loop.patch
+	$(APPLY) $(SRC)/ffmpeg/9015-avformat-mmttlv-disable-seeking-on-indeterminate-stream.patch
 	$(MOVE)
 
 .ffmpeg: ffmpeg

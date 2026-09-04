@@ -96,6 +96,7 @@ typedef struct
     unsigned i_update;
     bool b_mmt_initial_network_time;
     int64_t i_mmt_last_network_time_us;
+    bool b_can_seek;
 } demux_sys_t;
 
 #define AVFORMAT_IOBUFFER_SIZE 32768  /* FIXME */
@@ -614,6 +615,7 @@ int avformat_OpenDemux( vlc_object_t *p_this )
     p_sys->i_update = 0;
     p_sys->b_mmt_initial_network_time = false;
     p_sys->i_mmt_last_network_time_us = INT64_MIN;
+    p_sys->b_can_seek = b_can_seek;
 
     /* Create I/O wrapper */
     unsigned char * p_io_buffer = av_malloc( AVFORMAT_IOBUFFER_SIZE );
@@ -656,6 +658,8 @@ int avformat_OpenDemux( vlc_object_t *p_this )
         avformat_CloseDemux( p_this );
         return VLC_EGENERIC;
     }
+
+    p_sys->b_can_seek = b_can_seek && p_sys->ic->pb && (p_sys->ic->pb->seekable != 0);
 
     /* pass remaining options for as streams options */
     FindStreamInfo( p_demux, options );
@@ -1319,8 +1323,20 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
     switch( i_query )
     {
         case DEMUX_CAN_SEEK:
-            *va_arg( args, bool * ) = true;
+        {
+            bool b_can_seek = false;
+            vlc_stream_Control( p_demux->s, STREAM_CAN_SEEK, &b_can_seek );
+            uint64_t i_size = 0;
+            const bool b_has_size = (vlc_stream_GetSize( p_demux->s, &i_size ) == VLC_SUCCESS && i_size > 0);
+            bool *pb_seek = va_arg( args, bool * );
+            *pb_seek = b_can_seek &&
+                       p_sys->b_can_seek &&
+                       (b_has_size || (p_sys->ic && p_sys->ic->duration > 0)) &&
+                       p_sys->ic &&
+                       p_sys->ic->pb &&
+                       (p_sys->ic->pb->seekable != 0);
             return VLC_SUCCESS;
+        }
 
         case DEMUX_GET_POSITION:
             pf = va_arg( args, double * );
